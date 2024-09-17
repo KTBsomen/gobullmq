@@ -55,6 +55,9 @@ func NewQueue(opts QueueOption) (*Queue, error) {
 
 	q.EventEmitter.Init()
 
+	// Generate go files based of the lua scripts, internal/luaScripts, rather than redisAction.ExecLua
+	// As it closer to the way the original bull is implemented
+
 	if opts.KeyPrefix == "" {
 		q.KeyPrefix = "bull"
 	} else {
@@ -78,7 +81,16 @@ func NewQueue(opts QueueOption) (*Queue, error) {
 func (q *Queue) Init(opts QueueOption) error {
 	q.Name = opts.QueueName
 	q.Token = uuid.New()
-	q.KeyPrefix = opts.KeyPrefix + ":" + opts.QueueName + ":"
+
+	q.EventEmitter.Init()
+
+	if opts.KeyPrefix == "" {
+		q.KeyPrefix = "bull"
+	} else {
+		q.KeyPrefix = opts.KeyPrefix
+	}
+	q.Prefix = q.KeyPrefix
+	q.KeyPrefix = q.KeyPrefix + ":" + opts.QueueName + ":"
 
 	redisIp := opts.RedisIp
 	redisPasswd := opts.RedisPasswd
