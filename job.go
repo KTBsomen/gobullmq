@@ -4,7 +4,7 @@
  * @Author: liyibing liyibing@lixiang.com
  * @Date: 2023-07-19 15:59:43
  */
-package bull
+package gobullmq
 
 import (
 	"encoding/json"

@@ -4,36 +4,42 @@
  * @Author: liyibing liyibing@lixiang.com
  * @Date: 2023-07-19 15:55:49
  */
-package bull
+package gobullmq
 
 import (
-	"github.com/hellosekai/bull-golang/internal/luaScripts"
-	"github.com/hellosekai/bull-golang/internal/redisAction"
+	"context"
+
+	eventemitter "go.codycody31.dev/gobullmq/internal/eventEmitter"
+	"go.codycody31.dev/gobullmq/internal/luaScripts"
+	"go.codycody31.dev/gobullmq/internal/redisAction"
 
 	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
 )
 
-type BullQueueIface interface {
-	Add(jobData JobData, options ...withOption) (Job, error)
+type QueueIface interface {
+	eventemitter.EventEmitterIface
+	Add(jobName string, jobData JobData, options ...withOption) (Job, error)
 	Ping() error
 }
 
-var _ BullQueueIface = (*BullQueue)(nil)
+var _ QueueIface = (*Queue)(nil)
 
 const (
 	SingleNode = 0
 	Cluster    = 1
 )
 
-type BullQueue struct {
+type Queue struct {
+	eventemitter.EventEmitter
 	Name      string
 	Token     uuid.UUID
 	KeyPrefix string
 	Client    redis.Cmdable
+	Prefix    string
 }
 
-type BullQueueOption struct {
+type QueueOption struct {
 	Mode        int
 	KeyPrefix   string
 	QueueName   string
@@ -41,12 +47,21 @@ type BullQueueOption struct {
 	RedisPasswd string
 }
 
-func NewBullQueue(opts BullQueueOption) (*BullQueue, error) {
-	q := &BullQueue{
-		Name:      opts.QueueName,
-		Token:     uuid.New(),
-		KeyPrefix: opts.KeyPrefix + ":" + opts.QueueName + ":",
+func NewQueue(opts QueueOption) (*Queue, error) {
+	q := &Queue{
+		Name:  opts.QueueName,
+		Token: uuid.New(),
 	}
+
+	q.EventEmitter.Init()
+
+	if opts.KeyPrefix == "" {
+		q.KeyPrefix = "bull"
+	} else {
+		q.KeyPrefix = opts.KeyPrefix
+	}
+	q.Prefix = q.KeyPrefix
+	q.KeyPrefix = q.KeyPrefix + ":" + opts.QueueName + ":"
 
 	redisIp := opts.RedisIp
 	redisPasswd := opts.RedisPasswd
@@ -60,7 +75,7 @@ func NewBullQueue(opts BullQueueOption) (*BullQueue, error) {
 	return q, nil
 }
 
-func (q *BullQueue) Init(opts BullQueueOption) error {
+func (q *Queue) Init(opts QueueOption) error {
 	q.Name = opts.QueueName
 	q.Token = uuid.New()
 	q.KeyPrefix = opts.KeyPrefix + ":" + opts.QueueName + ":"
@@ -77,20 +92,19 @@ func (q *BullQueue) Init(opts BullQueueOption) error {
 	return nil
 }
 
-/**
- * @description:add a job into queue
- * @param {JobData} jobData
- * @param {...withOption} options
- * @return {*}
- */
-func (q *BullQueue) Add(jobData JobData, options ...withOption) (Job, error) {
+func (q *Queue) Add(jobName string, jobData JobData, options ...withOption) (Job, error) {
 	distOption := &JobOptions{}
+	var name string
 
 	for _, withOptionFunc := range options {
 		withOptionFunc(distOption)
 	}
 
-	name := _DEFAULT_JOB_NAME
+	if jobName == "" {
+		name = _DEFAULT_JOB_NAME
+	} else {
+		name = jobName
+	}
 	job, err := newJob(name, jobData, *distOption)
 	if err != nil {
 		return job, wrapError(err, "bull Add error")
@@ -100,10 +114,48 @@ func (q *BullQueue) Add(jobData JobData, options ...withOption) (Job, error) {
 		return job, wrapError(err, "bull Add error")
 	}
 
+	q.Emit("waiting", job)
+
 	return job, nil
 }
 
-func (q *BullQueue) addJob(job Job) error {
+func (q *Queue) Process(jobName string, handler func(Job) error) error {
+	return nil
+}
+
+func (q *Queue) pause(paused bool) {
+	// client := q.Client
+	// TODO: pause: No where near full implementation, missing lots
+}
+
+func (q *Queue) Pause() {
+	q.pause(true)
+	q.Emit("paused")
+}
+
+func (q *Queue) Resume() {
+	q.pause(false)
+	q.Emit("resumed")
+}
+
+func (q *Queue) IsPaused() bool {
+	client := q.Client
+	pausedKeyExists, err := client.HExists(context.Background(), q.KeyPrefix+"meta", "paused").Result()
+	if err != nil {
+		return false
+	}
+	if pausedKeyExists {
+		return true
+	}
+
+	return false
+}
+
+func (q *Queue) addJob(job Job) error {
+	// TODO: addJob: No where near full implementation, missing lots
+
+	// also missing the return of the job id, etc
+
 	rdb := q.Client
 	keys := q.getKeys()
 	args := q.getArgs(job)
@@ -114,7 +166,7 @@ func (q *BullQueue) addJob(job Job) error {
 	return nil
 }
 
-func (q *BullQueue) getKeys() []string {
+func (q *Queue) getKeys() []string {
 	keys := make([]string, 0, 6)
 	keys = append(keys, q.KeyPrefix+"wait")
 	keys = append(keys, q.KeyPrefix+"paused")
@@ -126,7 +178,7 @@ func (q *BullQueue) getKeys() []string {
 	return keys
 }
 
-func (q *BullQueue) getArgs(job Job) []interface{} {
+func (q *Queue) getArgs(job Job) []interface{} {
 	args := make([]interface{}, 0, 11)
 	args = append(args, q.KeyPrefix)
 	args = append(args, job.Id)
@@ -147,6 +199,6 @@ func (q *BullQueue) getArgs(job Job) []interface{} {
 	return args
 }
 
-func (q *BullQueue) Ping() error {
+func (q *Queue) Ping() error {
 	return redisAction.Ping(q.Client)
 }

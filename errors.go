@@ -4,7 +4,7 @@
  * @Author: liyibing liyibing@lixiang.com
  * @Date: 2023-07-19 17:11:08
  */
-package bull
+package gobullmq
 
 import "fmt"
 

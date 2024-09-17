@@ -4,7 +4,7 @@
  * @Author: liyibing liyibing@lixiang.com
  * @Date: 2023-07-28 10:25:57
  */
-package bull
+package gobullmq
 
 type withOption func(o *JobOptions)
 

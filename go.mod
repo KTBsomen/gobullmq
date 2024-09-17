@@ -1,4 +1,4 @@
-module github.com/hellosekai/bull-golang
+module go.codycody31.dev/gobullmq
 
 go 1.19
 
