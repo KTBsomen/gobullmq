@@ -10,7 +10,7 @@ import (
 	"context"
 
 	eventemitter "go.codycody31.dev/gobullmq/internal/eventEmitter"
-	"go.codycody31.dev/gobullmq/internal/luaScripts"
+	"go.codycody31.dev/gobullmq/internal/lua"
 	"go.codycody31.dev/gobullmq/internal/redisAction"
 
 	"github.com/go-redis/redis/v8"
@@ -121,10 +121,11 @@ func (q *Queue) Add(jobName string, jobData JobData, options ...withOption) (Job
 	if err != nil {
 		return job, wrapError(err, "bull Add error")
 	}
-	err = q.addJob(job)
+	jobId, err := q.addJob(job)
 	if err != nil {
 		return job, wrapError(err, "bull Add error")
 	}
+	job.Id = jobId
 
 	q.Emit("waiting", job)
 
@@ -163,7 +164,7 @@ func (q *Queue) IsPaused() bool {
 	return false
 }
 
-func (q *Queue) addJob(job Job) error {
+func (q *Queue) addJob(job Job) (string, error) {
 	// TODO: addJob: No where near full implementation, missing lots
 
 	// also missing the return of the job id, etc
@@ -171,11 +172,14 @@ func (q *Queue) addJob(job Job) error {
 	rdb := q.Client
 	keys := q.getKeys()
 	args := q.getArgs(job)
-	err := redisAction.ExecLua(luaScripts.AddJobLua, rdb, keys, args)
+	jobId, err := lua.AddJob(rdb, keys, args...)
 	if err != nil {
-		return err
+		return "nil", err
 	}
-	return nil
+
+	jobIdStr := jobId.(string)
+
+	return jobIdStr, nil
 }
 
 func (q *Queue) getKeys() []string {

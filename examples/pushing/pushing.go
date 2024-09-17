@@ -30,7 +30,7 @@ func main() {
 
 	jobQueue.On("waiting", func(args ...interface{}) {
 		job, _ := args[0].(gobullmq.Job)
-		fmt.Printf("Job is waiting: %+v\n", job)
+		fmt.Printf("Job is waiting: %s\n", job.Id)
 	})
 
 	// Create job data
@@ -54,14 +54,6 @@ func main() {
 	}
 
 	fmt.Println("Job submitted successfully")
-
-	// Submit the job to the queue
-	fmt.Println("Submitting job...")
-	_, err = jobQueue.Add("person", jobData)
-	if err != nil {
-		fmt.Println("error submitting job:", err)
-		return
-	}
 
 	select {}
 }
