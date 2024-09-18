@@ -20,6 +20,10 @@ import (
 type QueueIface interface {
 	eventemitter.EventEmitterIface
 	Add(jobName string, jobData JobData, options ...withOption) (Job, error)
+	Process(jobName string, handler func(Job) error) error
+	Pause()
+	Resume()
+	IsPaused() bool
 	Ping() error
 }
 
@@ -105,6 +109,8 @@ func (q *Queue) Init(opts QueueOption) error {
 }
 
 func (q *Queue) Add(jobName string, jobData JobData, options ...withOption) (Job, error) {
+	// TODO: add: handle repeatable jobs
+
 	distOption := &JobOptions{}
 	var name string
 
@@ -112,15 +118,25 @@ func (q *Queue) Add(jobName string, jobData JobData, options ...withOption) (Job
 		withOptionFunc(distOption)
 	}
 
+	if distOption.JobId != "" {
+		if distOption.JobId == "0" || (distOption.JobId[0] == '0' && distOption.JobId[1] != ':') {
+			return Job{}, wrapError(nil, "JobId cannot be '0' or start with 0:")
+		}
+	}
+
+	// TODO: setup this.jobsOpts for the default base options configured
+
 	if jobName == "" {
 		name = _DEFAULT_JOB_NAME
 	} else {
 		name = jobName
 	}
+
 	job, err := newJob(name, jobData, *distOption)
 	if err != nil {
 		return job, wrapError(err, "bull Add error")
 	}
+
 	jobId, err := q.addJob(job)
 	if err != nil {
 		return job, wrapError(err, "bull Add error")

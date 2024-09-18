@@ -91,3 +91,12 @@ func WithTimeStamp(timeStamp int64) withOption {
 		o.TimeStamp = timeStamp
 	}
 }
+
+func WithJobId(id string) withOption {
+	return func(o *JobOptions) {
+		if o == nil {
+			return
+		}
+		o.JobId = id
+	}
+}

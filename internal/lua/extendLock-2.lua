@@ -10,10 +10,11 @@
     ARGV[3]  jobid
 
   Output:
-    "1" if lock extended succesfully.
+    "1" if lock extented succesfully.
 ]]
 local rcall = redis.call
 if rcall("GET", KEYS[1]) == ARGV[1] then
+  --   if rcall("SET", KEYS[1], ARGV[1], "PX", ARGV[2], "XX") then
   if rcall("SET", KEYS[1], ARGV[1], "PX", ARGV[2]) then
     rcall("SREM", KEYS[2], ARGV[3])
     return 1

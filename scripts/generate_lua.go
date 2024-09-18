@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -63,11 +64,11 @@ type LuaCommand struct {
 	Keys     int
 }
 
-func main() {
-	// Directory where the Lua scripts are located
-	const scriptDir = "./internal/lua"
-	const outputDir = "./internal/lua"
+// Directory where the Lua scripts are located
+const scriptDir = "./internal/lua"
+const outputDir = "./internal/lua"
 
+func main() {
 	// Get all .lua files from the directory
 	files, err := filepath.Glob(filepath.Join(scriptDir, "*.lua"))
 	if err != nil {
@@ -85,6 +86,11 @@ func main() {
 
 		// Replace backticks with double backticks for Go template
 		content = []byte(strings.ReplaceAll(string(content), "`", "'"))
+
+		content, err = luaIncludeRecursive(content)
+		if err != nil {
+			log.Fatalf("failed to include file: %v", err)
+		}
 
 		// Get the base name of the Lua script (without extension)
 		baseName := strings.TrimSuffix(filepath.Base(file), filepath.Ext(file))
@@ -141,4 +147,73 @@ func main() {
 	// }
 
 	fmt.Println("Lua scripts Go files generated successfully")
+}
+
+func includeLua(path, luaFile string, oldContent []byte) ([]byte, error) {
+	// Read the content of the Lua script
+	content, err := ioutil.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	// Replace backticks with double backticks for Go template
+	content = []byte(strings.ReplaceAll(string(content), "`", "'"))
+
+	// Take the old content, locate the line --- @include "<filename>", replace it with the new content
+	newContent := []byte{}
+
+	for _, line := range strings.Split(string(oldContent), "\n") {
+		if strings.Contains(line, fmt.Sprintf("--- @include \"%s\"", luaFile)) {
+			newContent = append(newContent, content...)
+		} else {
+			newContent = append(newContent, []byte(line+"\n")...)
+		}
+	}
+
+	return newContent, nil
+}
+
+func luaNeeded(content []byte) ([]string, error) {
+	var luaToInclude []string
+	for _, line := range strings.Split(string(content), "\n") {
+		if strings.Contains(line, "--- @include") {
+			// Get the filename
+			filename := strings.Split(line, "\"")[1]
+			// Check if the filename is already in luaToInclude
+			for _, f := range luaToInclude {
+				if f == filename {
+					return nil, errors.New("file already included")
+				}
+			}
+			luaToInclude = append(luaToInclude, filename)
+		}
+	}
+
+	return luaToInclude, nil
+}
+
+func luaIncludeRecursive(content []byte) ([]byte, error) {
+	// luaToInclude, err := luaNeeded(content)
+	// if err != nil {
+	// 	log.Fatalf("failed to include file: %v", err)
+	// }
+
+	// fmt.Printf("File %s includes: %v\n", file, luaToInclude)
+
+	// for _, luaFile := range luaToInclude {
+	// 	luaFilePath := filepath.Join(scriptDir, luaFile+".lua")
+	// 	// Read the content of the Lua script
+	// 	content, err = includeLua(luaFilePath, luaFile, content)
+	// 	if err != nil {
+	// 		log.Fatalf("failed to include file: %v", err)
+	// 	} else {
+	// 		// fmt.Printf("Included file %s for %s\n", luaFile, file)
+	// 	}
+	// }
+
+	// Check what files are needed for the base file
+
+	// Then recursively include the files
+
+	return nil, nil
 }

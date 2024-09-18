@@ -27,6 +27,7 @@ type JobOptions struct {
 	Delay            int    `json:"delay"`
 	TimeStamp        int64  `json:"timestamp"`
 	Lifo             string `json:"lifo"`
+	JobId            string `json:"jobId"`
 }
 
 type Job struct {
