@@ -26,7 +26,10 @@ func main() {
 		return
 	}
 
-	jobQueue.Pause()
+	// jobQueue.Pause()
+	// fmt.Println(jobQueue.IsPaused())
+	// jobQueue.Resume()
+	// fmt.Println(jobQueue.IsPaused())
 
 	jobQueue.On("waiting", func(args ...interface{}) {
 		job, _ := args[0].(gobullmq.Job)

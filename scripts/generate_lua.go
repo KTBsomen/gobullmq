@@ -3,7 +3,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -76,6 +75,7 @@ func main() {
 	}
 
 	commands := []LuaCommand{}
+	includedFiles := map[string]bool{} // Track included files
 
 	for _, file := range files {
 		// Read the content of the Lua script
@@ -87,7 +87,8 @@ func main() {
 		// Replace backticks with double backticks for Go template
 		content = []byte(strings.ReplaceAll(string(content), "`", "'"))
 
-		content, err = luaIncludeRecursive(content)
+		// Recursively include necessary Lua files, starting from the script's directory
+		content, err = luaIncludeRecursive(file, content, filepath.Dir(file), includedFiles)
 		if err != nil {
 			log.Fatalf("failed to include file: %v", err)
 		}
@@ -149,6 +150,56 @@ func main() {
 	fmt.Println("Lua scripts Go files generated successfully")
 }
 
+func luaIncludeRecursive(file string, content []byte, baseDir string, includedFiles map[string]bool) ([]byte, error) {
+	// Get the Lua files that need to be included
+	luaToInclude, err := luaNeeded(content)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, luaFile := range luaToInclude {
+		// Skip the file if it's already included
+		// FIX: Bad check, this will be true the moment it is included for one file, not good
+		// Preferable track the base file that it is being included into, and use that as a key
+		// IE: baseName:LuaFile -> true
+		luid := strings.TrimSuffix(filepath.Base(file), filepath.Ext(file))
+		luid = luid + ":" + luaFile
+		fmt.Println(luid)
+		if includedFiles[luid] {
+			continue
+		}
+
+		// Mark the file as included
+		includedFiles[luaFile] = true
+
+		// Construct the full path of the file to include, relative to the base directory
+		luaFilePath := filepath.Join(baseDir, luaFile+".lua")
+
+		// Read the content of the Lua file to be included
+		includedContent, err := ioutil.ReadFile(luaFilePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read included Lua file: %v", err)
+		}
+
+		// Replace backticks with double backticks for Go template
+		includedContent = []byte(strings.ReplaceAll(string(includedContent), "`", "'"))
+
+		// Recursively include files within the included Lua file, updating baseDir to the new file's directory
+		includedContent, err = luaIncludeRecursive(luaFilePath, includedContent, filepath.Dir(luaFilePath), includedFiles)
+		if err != nil {
+			return nil, err
+		}
+
+		// Insert the included file content into the base file content
+		content, err = includeLua(luaFilePath, luaFile, content)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return content, nil
+}
+
 func includeLua(path, luaFile string, oldContent []byte) ([]byte, error) {
 	// Read the content of the Lua script
 	content, err := ioutil.ReadFile(path)
@@ -177,43 +228,10 @@ func luaNeeded(content []byte) ([]string, error) {
 	var luaToInclude []string
 	for _, line := range strings.Split(string(content), "\n") {
 		if strings.Contains(line, "--- @include") {
-			// Get the filename
+			// Extract the Lua filename from the include directive
 			filename := strings.Split(line, "\"")[1]
-			// Check if the filename is already in luaToInclude
-			for _, f := range luaToInclude {
-				if f == filename {
-					return nil, errors.New("file already included")
-				}
-			}
 			luaToInclude = append(luaToInclude, filename)
 		}
 	}
-
 	return luaToInclude, nil
-}
-
-func luaIncludeRecursive(content []byte) ([]byte, error) {
-	// luaToInclude, err := luaNeeded(content)
-	// if err != nil {
-	// 	log.Fatalf("failed to include file: %v", err)
-	// }
-
-	// fmt.Printf("File %s includes: %v\n", file, luaToInclude)
-
-	// for _, luaFile := range luaToInclude {
-	// 	luaFilePath := filepath.Join(scriptDir, luaFile+".lua")
-	// 	// Read the content of the Lua script
-	// 	content, err = includeLua(luaFilePath, luaFile, content)
-	// 	if err != nil {
-	// 		log.Fatalf("failed to include file: %v", err)
-	// 	} else {
-	// 		// fmt.Printf("Included file %s for %s\n", luaFile, file)
-	// 	}
-	// }
-
-	// Check what files are needed for the base file
-
-	// Then recursively include the files
-
-	return nil, nil
 }

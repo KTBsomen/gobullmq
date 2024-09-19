@@ -15,6 +15,18 @@ const (
 	_DEFAULT_JOB_NAME = "__default__"
 )
 
+type RedisJobOptions struct {
+	fpof bool // If true, moves parent to failed.
+	kl   int  // Maximum amount of log entries that will be preserved
+	rdof bool // If true, removes the job from its parent dependencies when it fails after all attempts.
+}
+
+type ParentOpts struct {
+	waitChildrenKey       string
+	parentDependenciesKey string
+	parentKey             string
+}
+
 // 这边应该要求传入json数据，需要在使用接口直接保证
 type JobData interface{}
 

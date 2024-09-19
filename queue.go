@@ -8,6 +8,7 @@ package gobullmq
 
 import (
 	"context"
+	"fmt"
 
 	eventemitter "go.codycody31.dev/gobullmq/internal/eventEmitter"
 	"go.codycody31.dev/gobullmq/internal/lua"
@@ -15,12 +16,12 @@ import (
 
 	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 type QueueIface interface {
 	eventemitter.EventEmitterIface
 	Add(jobName string, jobData JobData, options ...withOption) (Job, error)
-	Process(jobName string, handler func(Job) error) error
 	Pause()
 	Resume()
 	IsPaused() bool
@@ -137,7 +138,7 @@ func (q *Queue) Add(jobName string, jobData JobData, options ...withOption) (Job
 		return job, wrapError(err, "bull Add error")
 	}
 
-	jobId, err := q.addJob(job)
+	jobId, err := q.addJob(job, RedisJobOptions{}, distOption.JobId, ParentOpts{})
 	if err != nil {
 		return job, wrapError(err, "bull Add error")
 	}
@@ -148,13 +149,46 @@ func (q *Queue) Add(jobName string, jobData JobData, options ...withOption) (Job
 	return job, nil
 }
 
-func (q *Queue) Process(jobName string, handler func(Job) error) error {
-	return nil
-}
+func (q *Queue) pause(pause bool) error {
+	client := q.Client
+	p := "paused"
 
-func (q *Queue) pause(paused bool) {
-	// client := q.Client
-	// TODO: pause: No where near full implementation, missing lots
+	// Determine the source and destination queues based on whether to pause or resume
+	src := q.toKey("wait")
+	dst := q.toKey("paused")
+	if !pause {
+		src = q.toKey("paused")
+		dst = q.toKey("wait")
+		p = "resumed"
+	}
+
+	// Check if the source queue exists
+	exists, err := client.Exists(context.Background(), src).Result()
+	if err != nil {
+		return wrapError(err, "failed to check if queue exists")
+	}
+
+	if exists == 0 {
+		// If the queue doesn't exist, there's no need to rename it
+		return wrapError(nil, "source queue does not exist, nothing to pause or resume")
+	}
+
+	// Define the keys to operate on
+	keys := []string{
+		src,
+		dst,
+		q.toKey("meta"),
+		q.toKey("prioritized"),
+		q.toKey("events"),
+	}
+
+	_, err = lua.Pause(client, keys, p)
+	if err != nil {
+		fmt.Println("Error: ", err)
+		return wrapError(err, "failed to pause or resume queue")
+	}
+
+	return nil
 }
 
 func (q *Queue) Pause() {
@@ -180,20 +214,56 @@ func (q *Queue) IsPaused() bool {
 	return false
 }
 
-func (q *Queue) addJob(job Job) (string, error) {
+func (q *Queue) addJob(job Job, opts RedisJobOptions, jobId string, parentOpts ParentOpts) (string, error) {
 	// TODO: addJob: No where near full implementation, missing lots
 
 	// also missing the return of the job id, etc
 
 	rdb := q.Client
-	keys := q.getKeys()
-	args := q.getArgs(job)
-	jobId, err := lua.AddJob(rdb, keys, args...)
+
+	keys := make([]string, 0, 8)
+	keys = append(keys, q.KeyPrefix+"wait")
+	keys = append(keys, q.KeyPrefix+"paused")
+	keys = append(keys, q.KeyPrefix+"meta")
+	keys = append(keys, q.KeyPrefix+"id")
+	keys = append(keys, q.KeyPrefix+"delayed")
+	keys = append(keys, q.KeyPrefix+"prioritized")
+	keys = append(keys, q.KeyPrefix+"completed")
+	keys = append(keys, q.KeyPrefix+"events")
+	keys = append(keys, q.KeyPrefix+"pc")
+
+	// args := q.getArgs(job)
+	args := make([]interface{}, 0)
+	args = append(args, q.KeyPrefix)
+	args = append(args, jobId)
+	args = append(args, job.Name)
+	args = append(args, job.TimeStamp)
+	// TODO: Implement the following
+	// job.parentKey || null,
+	// parentOpts.waitChildrenKey || null,
+	// parentOpts.parentDependenciesKey || null,
+	// parent,
+	// job.repeatJobKey,
+	for i := 0; i < 5; i++ {
+		args = append(args, nil)
+	}
+
+	msgPackedArgs, err := msgpack.Marshal(args)
 	if err != nil {
 		return "nil", err
 	}
 
-	jobIdStr := jobId.(string)
+	msgPackedOpts, err := msgpack.Marshal(job.Opts)
+	if err != nil {
+		return "nil", err
+	}
+
+	givenJobId, err := lua.AddJob(rdb, keys, msgPackedArgs, job.Data, msgPackedOpts)
+	if err != nil {
+		return "nil", err
+	}
+
+	jobIdStr := givenJobId.(string)
 
 	return jobIdStr, nil
 }
@@ -233,4 +303,8 @@ func (q *Queue) getArgs(job Job) []interface{} {
 
 func (q *Queue) Ping() error {
 	return redisAction.Ping(q.Client)
+}
+
+func (q *Queue) toKey(name string) string {
+	return q.KeyPrefix + name
 }
