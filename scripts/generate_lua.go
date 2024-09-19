@@ -3,11 +3,14 @@
 package main
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"text/template"
@@ -55,7 +58,15 @@ var LuaScripts = map[string]func(redis.Cmdable, []string, ...interface{}) (inter
 }
 `
 
-// LuaCommand represents a Lua script and its associated data
+const includeRegex = `/^[-]{2,3}[ \t]*@include[ \t]+(["'])(.+?)\1[; \t\n]*$/m`
+
+// const includeRegex = `(?m)^[-]{2,3}[ \t]*@include[ \t]+(["'])(.+?)\1[; \t\n]*$`
+const emptyLineRegex = `/^\s*[\r\n]/gm`
+const scriptDir = "./internal/lua"
+const outputDir = "./internal/lua"
+
+var rootPath = ""
+
 type LuaCommand struct {
 	Name     string
 	FuncName string
@@ -63,69 +74,53 @@ type LuaCommand struct {
 	Keys     int
 }
 
-// Directory where the Lua scripts are located
-const scriptDir = "./internal/lua"
-const outputDir = "./internal/lua"
+type Command struct {
+	Name    string
+	Options struct {
+		NumberOfKeys int
+		Lua          string
+	}
+}
+
+type ScriptMetadata struct {
+	Name         string
+	NumberOfKeys int
+	Path         string
+	Content      string
+	Token        string
+	Includes     []ScriptMetadata
+}
+
+type Cache map[string]ScriptMetadata
 
 func main() {
-	// Get all .lua files from the directory
-	files, err := filepath.Glob(filepath.Join(scriptDir, "*.lua"))
-	if err != nil {
-		log.Fatalf("failed to list Lua files: %v", err)
-	}
+	// Get rootpath, look for a go.mod file
+	rootPath = findRootPath()
 
-	commands := []LuaCommand{}
-	includedFiles := map[string]bool{} // Track included files
+	scripts := loadScripts(scriptDir)
 
-	for _, file := range files {
-		// Read the content of the Lua script
-		content, err := ioutil.ReadFile(file)
-		if err != nil {
-			log.Fatalf("failed to read file: %v", err)
+	for _, script := range scripts {
+
+		lc := LuaCommand{
+			// remove -<number> from the name
+			Name:     strings.Split(script.Name, "-")[0],
+			FuncName: strings.Title(strings.Split(script.Name, "-")[0]),
+			Content:  script.Options.Lua,
+			Keys:     script.Options.NumberOfKeys,
 		}
-
-		// Replace backticks with double backticks for Go template
-		content = []byte(strings.ReplaceAll(string(content), "`", "'"))
-
-		// Recursively include necessary Lua files, starting from the script's directory
-		content, err = luaIncludeRecursive(file, content, filepath.Dir(file), includedFiles)
-		if err != nil {
-			log.Fatalf("failed to include file: %v", err)
-		}
-
-		// Get the base name of the Lua script (without extension)
-		baseName := strings.TrimSuffix(filepath.Base(file), filepath.Ext(file))
-		name := strings.Split(baseName, "-")[0]
-		numOfKeys := strings.Split(baseName, "-")[1]
-		funcName := strings.Title(name) // Capitalize the function name for Go export
-
-		// Assume each Lua script expects a certain number of keys (customize this)
-		keys, err := strconv.Atoi(numOfKeys) // Default number of keys (customize this per script)
-		if err != nil {
-			log.Fatalf("failed to convert number of keys: %v", err)
-		}
-
-		// Add the LuaCommand data to the list
-		command := LuaCommand{
-			Name:     baseName, // lowercase for map key
-			FuncName: funcName, // Capitalized for Go function name
-			Content:  string(content),
-			Keys:     keys,
-		}
-		commands = append(commands, command)
 
 		// Delete the old file if it exists
-		os.Remove(filepath.Join(outputDir, name+"_lua.go"))
+		os.Remove(filepath.Join(outputDir, lc.Name+"_lua.go"))
 
 		// Generate an individual Go file for each Lua script
-		outFile, err := os.Create(filepath.Join(outputDir, name+"_lua.go"))
+		outFile, err := os.Create(filepath.Join(outputDir, lc.Name+"_lua.go"))
 		if err != nil {
 			log.Fatalf("failed to create output file: %v", err)
 		}
 
 		// Execute the template for the Lua script Go file
 		tmpl := template.Must(template.New("luaCommand").Parse(luaCommandFileTemplate))
-		err = tmpl.Execute(outFile, command)
+		err = tmpl.Execute(outFile, lc)
 		if err != nil {
 			log.Fatalf("failed to execute template: %v", err)
 		}
@@ -133,105 +128,328 @@ func main() {
 		outFile.Close()
 	}
 
-	// // Create the centralized lua.go file
-	// mapFile, err := os.Create(filepath.Join(outputDir, "lua.go"))
-	// if err != nil {
-	// 	log.Fatalf("failed to create lua.go: %v", err)
-	// }
-	// defer mapFile.Close()
-
-	// // Execute the template for LuaScripts mapping
-	// tmpl := template.Must(template.New("luaScriptsMapping").Parse(luaScriptsMappingTemplate))
-	// err = tmpl.Execute(mapFile, commands)
-	// if err != nil {
-	// 	log.Fatalf("failed to execute template: %v", err)
-	// }
-
 	fmt.Println("Lua scripts Go files generated successfully")
 }
 
-func luaIncludeRecursive(file string, content []byte, baseDir string, includedFiles map[string]bool) ([]byte, error) {
-	// Get the Lua files that need to be included
-	luaToInclude, err := luaNeeded(content)
+func findRootPath() string {
+	rootPath, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
 	if err != nil {
-		return nil, err
+		log.Fatalf("failed to find root path: %v", err)
+	}
+	return strings.TrimSpace(string(rootPath))
+}
+
+func loadScripts(dir string) []Command {
+	luaFiles, err := filepath.Glob(filepath.Join(dir, "*.lua"))
+	if err != nil {
+		log.Fatalf("failed to list Lua files: %v", err)
 	}
 
-	for _, luaFile := range luaToInclude {
-		// Skip the file if it's already included
-		// FIX: Bad check, this will be true the moment it is included for one file, not good
-		// Preferable track the base file that it is being included into, and use that as a key
-		// IE: baseName:LuaFile -> true
-		luid := strings.TrimSuffix(filepath.Base(file), filepath.Ext(file))
-		luid = luid + ":" + luaFile
-		fmt.Println(luid)
-		if includedFiles[luid] {
+	if len(luaFiles) == 0 {
+		log.Fatalf("No .lua files found!", dir)
+	}
+
+	commands := []Command{}
+	// TODO: Use pointers for cache, so it's the same cache used in all commands
+	cache := Cache{}
+
+	for _, f := range luaFiles {
+		if !strings.Contains(f, "addJob-9") {
 			continue
 		}
 
-		// Mark the file as included
-		includedFiles[luaFile] = true
-
-		// Construct the full path of the file to include, relative to the base directory
-		luaFilePath := filepath.Join(baseDir, luaFile+".lua")
-
-		// Read the content of the Lua file to be included
-		includedContent, err := ioutil.ReadFile(luaFilePath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read included Lua file: %v", err)
-		}
-
-		// Replace backticks with double backticks for Go template
-		includedContent = []byte(strings.ReplaceAll(string(includedContent), "`", "'"))
-
-		// Recursively include files within the included Lua file, updating baseDir to the new file's directory
-		includedContent, err = luaIncludeRecursive(luaFilePath, includedContent, filepath.Dir(luaFilePath), includedFiles)
-		if err != nil {
-			return nil, err
-		}
-
-		// Insert the included file content into the base file content
-		content, err = includeLua(luaFilePath, luaFile, content)
-		if err != nil {
-			return nil, err
-		}
+		command := loadCommand(f, cache)
+		commands = append(commands, command)
 	}
 
-	return content, nil
+	return commands
 }
 
-func includeLua(path, luaFile string, oldContent []byte) ([]byte, error) {
-	// Read the content of the Lua script
-	content, err := ioutil.ReadFile(path)
-	if err != nil {
-		return nil, err
+func loadCommand(file string, cache Cache) Command {
+	filename := filepath.Base(file)
+	filename = filepath.Join(rootPath, file)
+
+	name, _ := splitFilename(filename)
+	script := cache[name]
+	if script.Name == "" {
+		content, err := os.ReadFile(file)
+		if err != nil {
+			log.Fatalf("failed to read file: %v", err)
+		}
+		contentStr := string(content)
+		script = parseScript(filename, contentStr, cache)
 	}
 
-	// Replace backticks with double backticks for Go template
-	content = []byte(strings.ReplaceAll(string(content), "`", "'"))
+	c, _ := interpolate(script, []string{})
+	lua := removeEmptyLines(c)
+	name, numberOfKeys := script.Name, script.NumberOfKeys
 
-	// Take the old content, locate the line --- @include "<filename>", replace it with the new content
-	newContent := []byte{}
+	return Command{
+		Name: name,
+		Options: struct {
+			NumberOfKeys int
+			Lua          string
+		}{
+			NumberOfKeys: numberOfKeys,
+			Lua:          lua,
+		},
+	}
+}
 
-	for _, line := range strings.Split(string(oldContent), "\n") {
-		if strings.Contains(line, fmt.Sprintf("--- @include \"%s\"", luaFile)) {
-			newContent = append(newContent, content...)
+func parseScript(filename, content string, cache Cache) ScriptMetadata {
+	name, numberOfKeys := splitFilename(filename)
+	meta := cache[name]
+	if meta.Name != "" && meta.Content == content {
+		return meta
+	}
+
+	fileInfo := ScriptMetadata{
+		Path:         filename,
+		Token:        getPathHash(filename),
+		Content:      content,
+		Name:         name,
+		NumberOfKeys: numberOfKeys,
+		Includes:     []ScriptMetadata{},
+	}
+
+	resolveDependencies(&fileInfo, cache, false, []string{})
+
+	return fileInfo
+}
+
+func interpolate(fileInfo ScriptMetadata, processed []string) (string, []string) {
+	content := fileInfo.Content
+	for _, include := range fileInfo.Includes {
+		emitted := contains(processed, include.Path)
+		fragment, processed := interpolate(include, processed)
+		replacement := ""
+		if !emitted {
+			replacement = fragment
+		}
+
+		if replacement == "" {
+			content = replaceAll(content, include.Token, "")
 		} else {
-			newContent = append(newContent, []byte(line+"\n")...)
+			content = strings.Replace(content, include.Token, replacement, 1)
+			content = replaceAll(content, include.Token, "")
 		}
-	}
 
-	return newContent, nil
+		processed = append(processed, include.Path)
+	}
+	return content, processed
 }
 
-func luaNeeded(content []byte) ([]string, error) {
-	var luaToInclude []string
-	for _, line := range strings.Split(string(content), "\n") {
-		if strings.Contains(line, "--- @include") {
-			// Extract the Lua filename from the include directive
-			filename := strings.Split(line, "\"")[1]
-			luaToInclude = append(luaToInclude, filename)
+// BUG: Content for includes is not being replaced or set correctly
+// Either that, or it's the interpolate, can't think of anything else
+// As the issue is that X root file, has Z includes, which have Y includes. However Y includes are not being replaced
+func resolveDependencies(fileInfo *ScriptMetadata, cache Cache, isInclude bool, stack []string) {
+	fmt.Printf("Resolving dependencies for %s, is include: %v\n", fileInfo.Path, isInclude)
+	for _, s := range stack {
+		if s == fileInfo.Path {
+			log.Fatalf("circular reference: %s", fileInfo.Path)
 		}
 	}
-	return luaToInclude, nil
+	stack = append(stack, fileInfo.Path)
+	content := fileInfo.Content
+
+	// while loop
+	for {
+		match := regexp.MustCompile(`(?m)^[-]{2,3}[ \t]*@include[ \t]+(["'])(.+?)[; \t\n]*$`).FindString(content)
+
+		if match == "" {
+			break
+		}
+
+		reference := strings.Split(match, "\"")[1]
+
+		// Build path to included file
+		var includedPath string
+		// includedPath := filepath.Join(filepath.Dir(fileInfo.Path), ensureExt(reference, "lua"))
+
+		if isPossiblyMappedPath(reference) {
+			includedPath = resolvePath(ensureExt(reference, "lua"), stack)
+		} else {
+			includedPath = filepath.Join(filepath.Dir(fileInfo.Path), ensureExt(reference, "lua"))
+		}
+
+		includePaths := []string{}
+
+		// if (hasFilenamePattern(includeFilename)) {
+		// 	const filesMatched = await getFilenamesByPattern(includeFilename);
+		// 	includePaths = filesMatched.map((x: string) => path.resolve(x));
+		//   } else {
+		// 	includePaths = [includeFilename];
+		//   }
+		includePaths = append(includePaths, includedPath)
+
+		if len(includePaths) == 0 {
+			raiseError(*fileInfo, "file not found", match)
+		}
+
+		tokens := []string{}
+
+		for _, includePath := range includePaths {
+			for _, inc := range fileInfo.Includes {
+				if inc.Path == includePath {
+					raiseError(*fileInfo, fmt.Sprintf("file already included: %s", includePath), match)
+				}
+			}
+
+			includeMetadata := cache[includePath]
+			var token string
+
+			if includeMetadata.Name == "" {
+				name, numberOfKeys := splitFilename(includePath)
+				childContent := ""
+				buf, err := os.ReadFile(includePath)
+				if err != nil {
+					if os.IsNotExist(err) {
+						raiseError(*fileInfo, fmt.Sprintf("include not found: %s", reference), match)
+					} else {
+						log.Fatalf("failed to read file: %v", err)
+					}
+				}
+
+				childContent = string(buf)
+
+				token = getPathHash(includePath)
+
+				includeMetadata = ScriptMetadata{
+					Name:         name,
+					NumberOfKeys: numberOfKeys,
+					Path:         includePath,
+					Content:      childContent,
+					Token:        token,
+					Includes:     []ScriptMetadata{},
+				}
+				cache[includePath] = includeMetadata
+			} else {
+				token = includeMetadata.Token
+			}
+
+			tokens = append(tokens, token)
+			fileInfo.Includes = append(fileInfo.Includes, includeMetadata)
+			resolveDependencies(&includeMetadata, cache, true, stack)
+		}
+
+		content = strings.Replace(content, fmt.Sprintf(`--- @include "%s"`, reference), strings.Join(tokens, "\n"), 1)
+	}
+
+	fileInfo.Content = content
+
+	if isInclude {
+		cache[fileInfo.Path] = *fileInfo
+	} else {
+		cache[fileInfo.Name] = *fileInfo
+	}
+}
+
+func contains(arr []string, str string) bool {
+	for _, a := range arr {
+		if a == str {
+			return true
+		}
+	}
+	return false
+}
+
+func resolvePath(scriptName string, stack []string) string {
+	// first := scriptName[0]
+	var sn string
+
+	// if (first === '~') {
+	// 	scriptName = path.join(this.rootPath, scriptName.substr(2));
+	//   } else if (first === '<') {
+	// 	const p = scriptName.indexOf('>');
+	// 	if (p > 0) {
+	// 	  const name = scriptName.substring(1, p);
+	// 	  const mappedPath = this.pathMapper.get(name);
+	// 	  if (!mappedPath) {
+	// 		throw new ScriptLoaderError(
+	// 		  `No path mapping found for "${name}"`,
+	// 		  scriptName,
+	// 		  stack,
+	// 		);
+	// 	  }
+	// 	  scriptName = path.join(mappedPath, scriptName.substring(p + 1));
+	// 	}
+	//   }
+
+	//   return path.normalize(scriptName);
+
+	// TODO: Support pathMapper
+	// if first == '~' {
+	// 	sn = filepath.Join(rootPath, scriptName[2:])
+	// } else if first == '<' {
+	// 	sn = filpa
+	// }
+	sn = filepath.Join(rootPath, scriptName[2:])
+
+	return filepath.Clean(sn)
+}
+
+func isPossiblyMappedPath(path string) bool {
+	return path != "" && (path[0] == '~' || path[0] == '<')
+}
+
+func findPos(content string, match string) (line, column int) {
+	pos := strings.Index(content, match)
+	if pos == -1 {
+		// Match not found, return -1 values to indicate failure
+		return -1, -1
+	}
+	arr := strings.Split(content[:pos], "\n")
+	line = len(arr)
+	column = len(arr[len(arr)-1]) + strings.Index(match, "@include") + 1
+	return
+}
+
+func raiseError(file ScriptMetadata, msg string, match string) {
+	line, column := findPos(match, match)
+	log.Fatalf("%s:%d:%d: %s", file.Path, line, column, msg)
+}
+
+func ensureExt(filename, ext string) string {
+	foundExt := filepath.Ext(filename)
+	if foundExt != "" && foundExt != "." {
+		return filename
+	}
+	if ext != "" && ext[0] != '.' {
+		ext = "." + ext
+	}
+	return filename + ext
+}
+
+func splitFilename(filePath string) (string, int) {
+	filename := filepath.Base(filePath)
+	name := strings.TrimSuffix(filename, filepath.Ext(filename))
+	if !strings.Contains(name, "-") {
+		return name, 0
+	}
+	numOfKeys := strings.Split(name, "-")[1]
+	numOfKeysInt, err := strconv.Atoi(numOfKeys)
+	if err != nil {
+		return name, 0
+	}
+
+	return name, numOfKeysInt
+}
+
+func sha1Hash(content string) string {
+	h := sha1.New()
+	h.Write([]byte(content))
+	sha1_hash := hex.EncodeToString(h.Sum(nil))
+	return sha1_hash
+}
+
+func getPathHash(normalizedPath string) string {
+	return fmt.Sprintf("@@%s", sha1Hash(normalizedPath))
+}
+
+func replaceAll(str string, find string, replace string) string {
+	return strings.ReplaceAll(str, find, replace)
+}
+
+func removeEmptyLines(str string) string {
+	return string(regexp.MustCompile(emptyLineRegex).ReplaceAll([]byte(str), []byte("")))
 }
