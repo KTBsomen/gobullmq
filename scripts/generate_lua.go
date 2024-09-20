@@ -58,10 +58,8 @@ var LuaScripts = map[string]func(redis.Cmdable, []string, ...interface{}) (inter
 }
 `
 
-const includeRegex = `/^[-]{2,3}[ \t]*@include[ \t]+(["'])(.+?)\1[; \t\n]*$/m`
-
-// const includeRegex = `(?m)^[-]{2,3}[ \t]*@include[ \t]+(["'])(.+?)\1[; \t\n]*$`
-const emptyLineRegex = `/^\s*[\r\n]/gm`
+const includeRegex = `(?m)^[-]{2,3}[ \t]*@include[ \t]+(["'])(.+?)[; \t\n]*$`
+const emptyLineRegex = `/^\s*$/gm`
 const scriptDir = "./internal/lua"
 const outputDir = "./internal/lua"
 
@@ -157,15 +155,16 @@ func loadScripts(dir string) []Command {
 		if !strings.Contains(f, "addJob-9") {
 			continue
 		}
+		var command Command
 
-		command := loadCommand(f, cache)
+		command, cache = loadCommand(f, cache)
 		commands = append(commands, command)
 	}
 
 	return commands
 }
 
-func loadCommand(file string, cache Cache) Command {
+func loadCommand(file string, cache Cache) (Command, Cache) {
 	filename := filepath.Base(file)
 	filename = filepath.Join(rootPath, file)
 
@@ -177,7 +176,7 @@ func loadCommand(file string, cache Cache) Command {
 			log.Fatalf("failed to read file: %v", err)
 		}
 		contentStr := string(content)
-		script = parseScript(filename, contentStr, cache)
+		script, cache = parseScript(filename, contentStr, cache)
 	}
 
 	c, _ := interpolate(script, []string{})
@@ -193,14 +192,14 @@ func loadCommand(file string, cache Cache) Command {
 			NumberOfKeys: numberOfKeys,
 			Lua:          lua,
 		},
-	}
+	}, cache
 }
 
-func parseScript(filename, content string, cache Cache) ScriptMetadata {
+func parseScript(filename, content string, cache Cache) (ScriptMetadata, Cache) {
 	name, numberOfKeys := splitFilename(filename)
 	meta := cache[name]
 	if meta.Name != "" && meta.Content == content {
-		return meta
+		return meta, cache
 	}
 
 	fileInfo := ScriptMetadata{
@@ -212,9 +211,9 @@ func parseScript(filename, content string, cache Cache) ScriptMetadata {
 		Includes:     []ScriptMetadata{},
 	}
 
-	resolveDependencies(&fileInfo, cache, false, []string{})
+	fileInfo, cache = resolveDependencies(fileInfo, cache, false, []string{})
 
-	return fileInfo
+	return fileInfo, cache
 }
 
 func interpolate(fileInfo ScriptMetadata, processed []string) (string, []string) {
@@ -230,7 +229,7 @@ func interpolate(fileInfo ScriptMetadata, processed []string) (string, []string)
 		if replacement == "" {
 			content = replaceAll(content, include.Token, "")
 		} else {
-			content = strings.Replace(content, include.Token, replacement, 1)
+			content = strings.Replace(content, include.Token, replacement, -1)
 			content = replaceAll(content, include.Token, "")
 		}
 
@@ -242,8 +241,7 @@ func interpolate(fileInfo ScriptMetadata, processed []string) (string, []string)
 // BUG: Content for includes is not being replaced or set correctly
 // Either that, or it's the interpolate, can't think of anything else
 // As the issue is that X root file, has Z includes, which have Y includes. However Y includes are not being replaced
-func resolveDependencies(fileInfo *ScriptMetadata, cache Cache, isInclude bool, stack []string) {
-	fmt.Printf("Resolving dependencies for %s, is include: %v\n", fileInfo.Path, isInclude)
+func resolveDependencies(fileInfo ScriptMetadata, cache Cache, isInclude bool, stack []string) (ScriptMetadata, Cache) {
 	for _, s := range stack {
 		if s == fileInfo.Path {
 			log.Fatalf("circular reference: %s", fileInfo.Path)
@@ -254,7 +252,7 @@ func resolveDependencies(fileInfo *ScriptMetadata, cache Cache, isInclude bool, 
 
 	// while loop
 	for {
-		match := regexp.MustCompile(`(?m)^[-]{2,3}[ \t]*@include[ \t]+(["'])(.+?)[; \t\n]*$`).FindString(content)
+		match := regexp.MustCompile(includeRegex).FindString(content)
 
 		if match == "" {
 			break
@@ -283,7 +281,7 @@ func resolveDependencies(fileInfo *ScriptMetadata, cache Cache, isInclude bool, 
 		includePaths = append(includePaths, includedPath)
 
 		if len(includePaths) == 0 {
-			raiseError(*fileInfo, "file not found", match)
+			raiseError(fileInfo, "file not found", match)
 		}
 
 		tokens := []string{}
@@ -291,7 +289,7 @@ func resolveDependencies(fileInfo *ScriptMetadata, cache Cache, isInclude bool, 
 		for _, includePath := range includePaths {
 			for _, inc := range fileInfo.Includes {
 				if inc.Path == includePath {
-					raiseError(*fileInfo, fmt.Sprintf("file already included: %s", includePath), match)
+					raiseError(fileInfo, fmt.Sprintf("file already included: %s", includePath), match)
 				}
 			}
 
@@ -304,7 +302,7 @@ func resolveDependencies(fileInfo *ScriptMetadata, cache Cache, isInclude bool, 
 				buf, err := os.ReadFile(includePath)
 				if err != nil {
 					if os.IsNotExist(err) {
-						raiseError(*fileInfo, fmt.Sprintf("include not found: %s", reference), match)
+						raiseError(fileInfo, fmt.Sprintf("include not found: %s", reference), match)
 					} else {
 						log.Fatalf("failed to read file: %v", err)
 					}
@@ -328,20 +326,32 @@ func resolveDependencies(fileInfo *ScriptMetadata, cache Cache, isInclude bool, 
 			}
 
 			tokens = append(tokens, token)
+			includeMetadata, cache = resolveDependencies(includeMetadata, cache, true, stack)
 			fileInfo.Includes = append(fileInfo.Includes, includeMetadata)
-			resolveDependencies(&includeMetadata, cache, true, stack)
 		}
 
-		content = strings.Replace(content, fmt.Sprintf(`--- @include "%s"`, reference), strings.Join(tokens, "\n"), 1)
+		if len(tokens) > 0 {
+			content = strings.Replace(content, match, tokens[len(tokens)-1], 1)
+		}
 	}
 
 	fileInfo.Content = content
 
-	if isInclude {
-		cache[fileInfo.Path] = *fileInfo
-	} else {
-		cache[fileInfo.Name] = *fileInfo
+	// Do a last check to ensure that the file doesn't have any includes left
+	for {
+		match := regexp.MustCompile(includeRegex).FindString(fileInfo.Content)
+		if match == "" {
+			break
+		}
 	}
+
+	if isInclude {
+		cache[fileInfo.Path] = fileInfo
+	} else {
+		cache[fileInfo.Name] = fileInfo
+	}
+
+	return fileInfo, cache
 }
 
 func contains(arr []string, str string) bool {
@@ -451,5 +461,6 @@ func replaceAll(str string, find string, replace string) string {
 }
 
 func removeEmptyLines(str string) string {
-	return string(regexp.MustCompile(emptyLineRegex).ReplaceAll([]byte(str), []byte("")))
+	emptyLineRegex := `(?m)^\s*$[\r\n]*`
+	return regexp.MustCompile(emptyLineRegex).ReplaceAllString(str, "")
 }
