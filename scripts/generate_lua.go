@@ -152,9 +152,6 @@ func loadScripts(dir string) []Command {
 	cache := Cache{}
 
 	for _, f := range luaFiles {
-		if !strings.Contains(f, "addJob-9") {
-			continue
-		}
 		var command Command
 
 		command, cache = loadCommand(f, cache)

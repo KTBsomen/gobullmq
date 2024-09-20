@@ -154,16 +154,16 @@ func (q *Queue) pause(pause bool) error {
 	p := "paused"
 
 	// Determine the source and destination queues based on whether to pause or resume
-	src := q.toKey("wait")
-	dst := q.toKey("paused")
+	src := "wait"
+	dst := "paused"
 	if !pause {
-		src = q.toKey("paused")
-		dst = q.toKey("wait")
+		src = "paused"
+		dst = "wait"
 		p = "resumed"
 	}
 
 	// Check if the source queue exists
-	exists, err := client.Exists(context.Background(), src).Result()
+	exists, err := client.Exists(context.Background(), q.toKey(src)).Result()
 	if err != nil {
 		return wrapError(err, "failed to check if queue exists")
 	}
@@ -175,18 +175,19 @@ func (q *Queue) pause(pause bool) error {
 
 	// Define the keys to operate on
 	keys := []string{
-		src,
-		dst,
+		q.toKey(src),
+		q.toKey(dst),
 		q.toKey("meta"),
 		q.toKey("prioritized"),
 		q.toKey("events"),
 	}
 
-	_, err = lua.Pause(client, keys, p)
+	rs, err := lua.Pause(client, keys, p)
 	if err != nil {
 		fmt.Println("Error: ", err)
 		return wrapError(err, "failed to pause or resume queue")
 	}
+	fmt.Println("Result: ", rs)
 
 	return nil
 }
@@ -203,15 +204,8 @@ func (q *Queue) Resume() {
 
 func (q *Queue) IsPaused() bool {
 	client := q.Client
-	pausedKeyExists, err := client.HExists(context.Background(), q.KeyPrefix+"meta", "paused").Result()
-	if err != nil {
-		return false
-	}
-	if pausedKeyExists {
-		return true
-	}
-
-	return false
+	pausedKeyExists, _ := client.HExists(context.Background(), q.KeyPrefix+"meta", "paused").Result()
+	return pausedKeyExists
 }
 
 func (q *Queue) addJob(job Job, opts RedisJobOptions, jobId string, parentOpts ParentOpts) (string, error) {
@@ -268,6 +262,26 @@ func (q *Queue) addJob(job Job, opts RedisJobOptions, jobId string, parentOpts P
 	return jobIdStr, nil
 }
 
+func (q *Queue) Drain(delayed bool) error {
+	keys := []string{
+		q.toKey("wait"),
+		q.toKey("paused"),
+	}
+
+	if delayed {
+		keys = append(keys, q.toKey("delayed"))
+	} else {
+		keys = append(keys, "")
+	}
+	keys = append(keys, q.toKey("prioritized"))
+
+	_, err := lua.Drain(q.Client, keys, q.KeyPrefix)
+	if err != nil {
+		return wrapError(err, "failed to drain queue")
+	}
+	return nil
+}
+
 func (q *Queue) getKeys() []string {
 	keys := make([]string, 0, 6)
 	keys = append(keys, q.KeyPrefix+"wait")
@@ -307,4 +321,8 @@ func (q *Queue) Ping() error {
 
 func (q *Queue) toKey(name string) string {
 	return q.KeyPrefix + name
+}
+
+func (q *Queue) Close() {
+	q.Client.Quit(context.Background())
 }
