@@ -1,9 +1,3 @@
-/**
- * @Description: data struct and operations with queue
- * @FilePath: /bull-golang/queue.go
- * @Author: liyibing liyibing@lixiang.com
- * @Date: 2023-07-19 15:55:49
- */
 package gobullmq
 
 import (
@@ -21,7 +15,7 @@ import (
 
 type QueueIface interface {
 	eventemitter.EventEmitterIface
-	Add(jobName string, jobData JobData, options ...withOption) (Job, error)
+	Add(jobName string, jobData JobData, options ...WithOption) (Job, error)
 	Pause()
 	Resume()
 	IsPaused() bool
@@ -47,21 +41,17 @@ type Queue struct {
 type QueueOption struct {
 	Mode        int
 	KeyPrefix   string
-	QueueName   string
 	RedisIp     string
 	RedisPasswd string
 }
 
-func NewQueue(opts QueueOption) (*Queue, error) {
+func NewQueue(name string, opts QueueOption) (*Queue, error) {
 	q := &Queue{
-		Name:  opts.QueueName,
+		Name:  name,
 		Token: uuid.New(),
 	}
 
 	q.EventEmitter.Init()
-
-	// Generate go files based of the lua scripts, internal/luaScripts, rather than redisAction.ExecLua
-	// As it closer to the way the original bull is implemented
 
 	if opts.KeyPrefix == "" {
 		q.KeyPrefix = "bull"
@@ -69,7 +59,11 @@ func NewQueue(opts QueueOption) (*Queue, error) {
 		q.KeyPrefix = opts.KeyPrefix
 	}
 	q.Prefix = q.KeyPrefix
-	q.KeyPrefix = q.KeyPrefix + ":" + opts.QueueName + ":"
+	q.KeyPrefix = q.KeyPrefix + ":" + name + ":"
+
+	if name == "" {
+		return nil, wrapError(nil, "Queue name must be provided'")
+	}
 
 	redisIp := opts.RedisIp
 	redisPasswd := opts.RedisPasswd
@@ -83,35 +77,15 @@ func NewQueue(opts QueueOption) (*Queue, error) {
 	return q, nil
 }
 
-func (q *Queue) Init(opts QueueOption) error {
-	q.Name = opts.QueueName
-	q.Token = uuid.New()
-
-	q.EventEmitter.Init()
-
-	if opts.KeyPrefix == "" {
-		q.KeyPrefix = "bull"
-	} else {
-		q.KeyPrefix = opts.KeyPrefix
-	}
-	q.Prefix = q.KeyPrefix
-	q.KeyPrefix = q.KeyPrefix + ":" + opts.QueueName + ":"
-
-	redisIp := opts.RedisIp
-	redisPasswd := opts.RedisPasswd
-	redisMode := opts.Mode
-	var err error
-	q.Client, err = redisAction.Init(redisIp, redisPasswd, redisMode)
+func (q *Queue) Init(name string, opts QueueOption) (*Queue, error) {
+	nq, err := NewQueue(name, opts)
 	if err != nil {
-		return wrapError(err, "bull Init error")
+		return nil, wrapError(err, "bull Init error")
 	}
-
-	return nil
+	return nq, nil
 }
 
-func (q *Queue) Add(jobName string, jobData JobData, options ...withOption) (Job, error) {
-	// TODO: add: handle repeatable jobs
-
+func (q *Queue) Add(jobName string, jobData JobData, options ...WithOption) (Job, error) {
 	distOption := &JobOptions{}
 	var name string
 
@@ -138,7 +112,7 @@ func (q *Queue) Add(jobName string, jobData JobData, options ...withOption) (Job
 		return job, wrapError(err, "bull Add error")
 	}
 
-	jobId, err := q.addJob(job, RedisJobOptions{}, distOption.JobId, ParentOpts{})
+	jobId, err := q.addJob(job, distOption.JobId)
 	if err != nil {
 		return job, wrapError(err, "bull Add error")
 	}
@@ -208,11 +182,7 @@ func (q *Queue) IsPaused() bool {
 	return pausedKeyExists
 }
 
-func (q *Queue) addJob(job Job, opts RedisJobOptions, jobId string, parentOpts ParentOpts) (string, error) {
-	// TODO: addJob: No where near full implementation, missing lots
-
-	// also missing the return of the job id, etc
-
+func (q *Queue) addJob(job Job, jobId string) (string, error) {
 	rdb := q.Client
 
 	keys := make([]string, 0, 8)
@@ -232,12 +202,6 @@ func (q *Queue) addJob(job Job, opts RedisJobOptions, jobId string, parentOpts P
 	args = append(args, jobId)
 	args = append(args, job.Name)
 	args = append(args, job.TimeStamp)
-	// TODO: Implement the following
-	// job.parentKey || null,
-	// parentOpts.waitChildrenKey || null,
-	// parentOpts.parentDependenciesKey || null,
-	// parent,
-	// job.repeatJobKey,
 	for i := 0; i < 5; i++ {
 		args = append(args, nil)
 	}
@@ -282,47 +246,10 @@ func (q *Queue) Drain(delayed bool) error {
 	return nil
 }
 
-func (q *Queue) getKeys() []string {
-	keys := make([]string, 0, 6)
-	keys = append(keys, q.KeyPrefix+"wait")
-	keys = append(keys, q.KeyPrefix+"paused")
-	keys = append(keys, q.KeyPrefix+"meta-paused")
-	keys = append(keys, q.KeyPrefix+"id")
-	keys = append(keys, q.KeyPrefix+"delayed")
-	keys = append(keys, q.KeyPrefix+"priority")
-
-	return keys
-}
-
-func (q *Queue) getArgs(job Job) []interface{} {
-	args := make([]interface{}, 0, 11)
-	args = append(args, q.KeyPrefix)
-	args = append(args, job.Id)
-	args = append(args, job.Name)
-	args = append(args, job.Data)
-	args = append(args, job.OptsByJson)
-	args = append(args, job.TimeStamp)
-	args = append(args, job.Delay)
-	args = append(args, job.DelayTimeStamp)
-	args = append(args, job.Opts.Priority)
-	if job.Opts.Lifo == "RPUSH" {
-		args = append(args, "RPUSH")
-	} else {
-		args = append(args, "LPUSH")
-	}
-	args = append(args, q.Token)
-
-	return args
-}
-
 func (q *Queue) Ping() error {
 	return redisAction.Ping(q.Client)
 }
 
 func (q *Queue) toKey(name string) string {
 	return q.KeyPrefix + name
-}
-
-func (q *Queue) Close() {
-	q.Client.Quit(context.Background())
 }

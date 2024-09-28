@@ -1,19 +1,8 @@
-/**
- * @Description:
- * @FilePath: /bull-golang/common.go
- * @Author: liyibing liyibing@lixiang.com
- * @Date: 2023-07-28 10:25:57
- */
 package gobullmq
 
-type withOption func(o *JobOptions)
+type WithOption func(o *JobOptions)
 
-/**
- * @description: set priority, 0 is highest and default value
- * @param {int} priority
- * @return {*}
- */
-func WithPriorityOp(priority int) withOption {
+func WithPriorityOp(priority int) WithOption {
 	return func(o *JobOptions) {
 		if o == nil {
 			return
@@ -22,12 +11,7 @@ func WithPriorityOp(priority int) withOption {
 	}
 }
 
-/**
- * @description: false is default
- * @param {bool} flag
- * @return {*}
- */
-func WithRemoveOnCompleteOp(flag bool) withOption {
+func WithRemoveOnCompleteOp(flag bool) WithOption {
 	return func(o *JobOptions) {
 		if o == nil {
 			return
@@ -36,12 +20,7 @@ func WithRemoveOnCompleteOp(flag bool) withOption {
 	}
 }
 
-/**
- * @description: false is default
- * @param {bool} flag
- * @return {*}
- */
-func WithRemoveOnFailOp(flag bool) withOption {
+func WithRemoveOnFailOp(flag bool) WithOption {
 	return func(o *JobOptions) {
 		if o == nil {
 			return
@@ -50,12 +29,7 @@ func WithRemoveOnFailOp(flag bool) withOption {
 	}
 }
 
-/**
- * @description: set attemp times and 1 is default
- * @param {int} times
- * @return {*}
- */
-func WithAttemptsOp(times int) withOption {
+func WithAttemptsOp(times int) WithOption {
 	return func(o *JobOptions) {
 		if o == nil {
 			return
@@ -64,12 +38,7 @@ func WithAttemptsOp(times int) withOption {
 	}
 }
 
-/**
- * @description: set delay time and 0 is default
- * @param {int} delayTime
- * @return {*}
- */
-func WithDelayOp(delayTime int) withOption {
+func WithDelayOp(delayTime int) WithOption {
 	return func(o *JobOptions) {
 		if o == nil {
 			return
@@ -78,12 +47,8 @@ func WithDelayOp(delayTime int) withOption {
 	}
 }
 
-/**
- * @description:
- * @param {int64} timeStamp by time.Now().UnixMilli()
- * @return {*}
- */
-func WithTimeStamp(timeStamp int64) withOption {
+// WithTimeStamp timeStamp by time.Now().UnixMilli()
+func WithTimeStamp(timeStamp int64) WithOption {
 	return func(o *JobOptions) {
 		if o == nil {
 			return
@@ -92,7 +57,7 @@ func WithTimeStamp(timeStamp int64) withOption {
 	}
 }
 
-func WithJobId(id string) withOption {
+func WithJobId(id string) WithOption {
 	return func(o *JobOptions) {
 		if o == nil {
 			return
