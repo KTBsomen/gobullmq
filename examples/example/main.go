@@ -54,11 +54,17 @@ func main() {
 		return
 	}
 
-	_, err = q.Add("test", jobdata)
+	j, err := q.Add("test", jobdata)
 	if err != nil {
 		println(err.Error())
 	}
-	_, err = q.Add("test", jobdata)
+
+	err = q.Remove(j.Id, true)
+	if err != nil {
+		println(err.Error())
+	}
+
+	j, err = q.Add("test", jobdata)
 	if err != nil {
 		println(err.Error())
 	}

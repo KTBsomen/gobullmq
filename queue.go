@@ -3,6 +3,7 @@ package gobullmq
 import (
 	"context"
 	"fmt"
+	"time"
 
 	eventemitter "go.codycody31.dev/gobullmq/internal/eventEmitter"
 	"go.codycody31.dev/gobullmq/internal/lua"
@@ -11,6 +12,18 @@ import (
 	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
 	"github.com/vmihailenco/msgpack/v5"
+)
+
+type QueueEventType string
+
+var (
+	QueueEventCompleted   QueueEventType = "completed"
+	QueueEventWait        QueueEventType = "wait"
+	QueueEventActive      QueueEventType = "active"
+	QueueEventPaused      QueueEventType = "paused"
+	QueueEventPrioritized QueueEventType = "prioritized"
+	QueueEventDelayed     QueueEventType = "delayed"
+	QueueEventFailed      QueueEventType = "failed"
 )
 
 type QueueIface interface {
@@ -36,6 +49,7 @@ type Queue struct {
 	KeyPrefix string
 	Client    redis.Cmdable
 	Prefix    string
+	ctx       context.Context
 }
 
 type QueueOption struct {
@@ -49,6 +63,7 @@ func NewQueue(name string, opts QueueOption) (*Queue, error) {
 	q := &Queue{
 		Name:  name,
 		Token: uuid.New(),
+		ctx:   context.Background(), // TODO: Take input of context
 	}
 
 	q.EventEmitter.Init()
@@ -248,10 +263,107 @@ func (q *Queue) Drain(delayed bool) error {
 	return nil
 }
 
+// Clean cleans jobs from the queue (limit is the max number of jobs to clean, 0 is unlimited)
+func (q *Queue) Clean(grace int, limit int, cType QueueEventType) ([]string, error) {
+	var jobs []string
+
+	set := cType
+	timestamp := time.Now().Unix() - int64(grace)
+
+	keys := []string{
+		q.toKey(string(set)),
+		q.toKey("events"),
+	}
+
+	i, err := lua.CleanJobsInSet(q.Client, keys, q.KeyPrefix, timestamp, limit, string(set))
+	if err != nil {
+		return jobs, wrapError(err, "failed to clean jobs")
+	}
+
+	jobs = i.([]string)
+
+	q.Emit("cleaned", jobs, string(set))
+	return jobs, nil
+}
+
+type ObliterateOpts struct {
+	Force bool // Use force = true to force obliteration even with active jobs in the queue (default: false)
+	Count int  // Use count with the maximum number of deleted keys per iteration (default: 1000)
+}
+
+func (q *Queue) Obliterate(opts ObliterateOpts) error {
+	err := q.pause(true)
+	if err != nil {
+		return wrapError(err, "failed to pause queue")
+	}
+
+	var force string
+	if opts.Force {
+		force = "force"
+	}
+
+	count := opts.Count
+	if count == 0 {
+		count = 1000
+	}
+
+	keys := []string{
+		q.toKey("meta"),
+		q.KeyPrefix,
+	}
+
+	for {
+		i, err := lua.Obliterate(q.Client, keys, count, force)
+		if err != nil {
+			return wrapError(err, "failed to obliterate queue")
+		}
+
+		// -1: Queue is not paused
+		// -2: Queue has active jobs
+		// 0: Queue obliterated completely
+		// 1: Queue obliterated partially
+		result := i.(int64)
+
+		if result < 0 {
+			switch result {
+			case -1:
+				return wrapError(nil, "cannot obliterate non-paused queue")
+			case -2:
+				return wrapError(nil, "cannot obliterate queue with active jobs")
+			}
+		} else if result == 0 {
+			break
+		}
+	}
+
+	return nil
+}
+
 func (q *Queue) Ping() error {
 	return redisAction.Ping(q.Client)
 }
 
 func (q *Queue) toKey(name string) string {
 	return q.KeyPrefix + name
+}
+
+func (q *Queue) Remove(jobId string, removeChildren bool) error {
+	keys := []string{
+		q.KeyPrefix,
+	}
+
+	i, err := lua.RemoveJob(q.Client, keys, jobId, removeChildren)
+	if err != nil {
+		return wrapError(err, fmt.Sprintf("failed to remove job: %s", jobId))
+	}
+
+	if i.(int64) == 0 {
+		return wrapError(err, fmt.Sprintf("failed to remove job: %s, the job is locked", jobId))
+	}
+
+	return nil
+}
+
+func (q *Queue) TrimEvents(max int64) (int64, error) {
+	return q.Client.XTrim(q.ctx, q.KeyPrefix+"events", max).Result()
 }
