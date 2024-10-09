@@ -1,4 +1,4 @@
-package queue_test
+package main
 
 import (
 	"context"
@@ -22,7 +22,7 @@ func TestPauseQueue(t *testing.T) {
 			RedisIp:     "127.0.0.1:6379",
 			RedisPasswd: "",
 		})
-		qEvents = gobullmq.NewQueueEvents(context.Background(), queueName, gobullmq.QueueEventsOptions{
+		qEvents, _ = gobullmq.NewQueueEvents(context.Background(), queueName, gobullmq.QueueEventsOptions{
 			RedisClient: *redis.NewClient(&redis.Options{
 				Addr:     "127.0.0.1:6379",
 				Password: "",
@@ -34,7 +34,7 @@ func TestPauseQueue(t *testing.T) {
 	afterEach := func() {
 		// q.Close()
 		qEvents.Close()
-		//utils.RemoveAllQueueData(connection, queueName)
+		//testutils.RemoveAllQueueData(connection, queueName)
 	}
 
 	//t.Run("should not process delayed jobs", func(t *testing.T) {

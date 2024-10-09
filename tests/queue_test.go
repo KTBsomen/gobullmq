@@ -1,4 +1,4 @@
-package queue_test
+package main
 
 import (
 	"fmt"

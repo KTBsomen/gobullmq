@@ -34,3 +34,7 @@ generate: generate-lua ## Run all code generations
 .PHONY: generate-lua
 generate-lua: ## Generate Lua bindings
 	go run ./scripts/generate_lua.go
+
+.PHONY: test
+test: ## Run tests
+	go test -v ./...
