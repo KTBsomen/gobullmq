@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	eventemitter "go.codycody31.dev/gobullmq/internal/eventEmitter"
 	"sync"
+	"time"
 )
 
 type QueueEventsIface interface {
@@ -21,32 +22,30 @@ type QueueEventsIface interface {
 }
 
 type QueueEvents struct {
-	Name        string
-	Token       uuid.UUID
+	Name        string                     // Name of the queue
+	Token       uuid.UUID                  // Token used to identify the queue events
 	ee          *eventemitter.EventEmitter // Event emitter used to handle events occuring in worker threads/go routines/etc
-	running     bool
-	closing     bool
-	redisClient redis.Client
-	ctx         context.Context
-	cancel      context.CancelFunc
+	running     bool                       // Flag to indicate if the queue events is running
+	closing     bool                       // Flag to indicate if the queue events is closing
+	redisClient redis.Client               // Redis client used to interact with the redis server
+	ctx         context.Context            // Context used to handle the queue events
+	cancel      context.CancelFunc         // Cancel function used to stop the queue events
 	Prefix      string
 	KeyPrefix   string
-	mutex       sync.Mutex
-	wg          sync.WaitGroup
+	mutex       sync.Mutex     // Mutex used to lock/unlock the queue events
+	wg          sync.WaitGroup // WaitGroup used to wait for the queue events to finish
 	Opts        struct {
-		LastEventId string
+		LastEventId string // Last event id
 	}
 }
 
 type QueueEventsOptions struct {
 	RedisClient redis.Client // Assume we have been handled a working and valid redis con
-	Autorun     bool
-	Prefix      string
+	Autorun     bool         // If true, run the queue events immediately after creation
+	Prefix      string       // Prefix for the queue events key
 }
 
-// TODO: Define a context, so if we need to shutdown the queue we can use the context to stop the queue
-// And do it safely
-
+// NewQueueEvents creates a new QueueEvents instance
 func NewQueueEvents(ctx context.Context, name string, opts QueueEventsOptions) *QueueEvents {
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -107,19 +106,20 @@ func (qe *QueueEvents) Run() error {
 	qe.running = true
 	client := qe.redisClient
 
-	// Set the name of the client connection to the queue name
 	client.Do(qe.ctx, "CLIENT", "SETNAME", fmt.Sprintf("%s:%s%s", qe.Prefix, base64.StdEncoding.EncodeToString([]byte(qe.Name)), ":qe"))
 
-	qe.wg.Add(1) // Add to WaitGroup
+	qe.wg.Add(1)
 
-	// Use a goroutine to run the async task.
 	go func() {
 		defer func() {
 			qe.running = false
-			qe.wg.Done() // Signal WaitGroup when done
+			qe.wg.Done()
 		}()
 		if err := qe.consumeEvents(client); err != nil {
-			qe.Emit("error", fmt.Sprintf("Error consuming events: %v", err))
+			// Handle critical errors: log and possibly shut down
+			qe.Emit("error", fmt.Sprintf("Critical error in consumeEvents: %v", err))
+			// Optionally, you can decide to cancel the context to stop other operations
+			qe.cancel()
 		}
 	}()
 
@@ -133,81 +133,85 @@ func (qe *QueueEvents) consumeEvents(client redis.Client) error {
 		id = qe.Opts.LastEventId
 	}
 	for {
-		if qe.closing {
-			break
+		select {
+		case <-qe.ctx.Done():
+			return nil
+		default:
 		}
 
-		// https://www.dragonflydb.io/code-examples/golang-redis-xread
 		streams, err := client.XRead(qe.ctx, &redis.XReadArgs{
 			Streams: []string{eventKey, id},
 			Block:   0,
 		}).Result()
 
-		// TODO: Think about how error handling needs to be done, if we need to return an error or just continue
-
-		if errors.Is(err, redis.Nil) {
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
+			qe.Emit("error", fmt.Sprintf("Error reading from stream: %v", err))
+			time.Sleep(500 * time.Millisecond)
 			continue
-		} else if errors.Is(err, context.Canceled) {
-			return nil
-		} else if err != nil {
-			// Log or handle error based on your needs
-			return err
 		}
 
 		for _, stream := range streams {
 			for _, message := range stream.Messages {
-				id := message.ID
+				id = message.ID
 				args := message.Values
 
-				type event struct {
-					Event string `json:"event"`
-					JobId string `json:"jobId"`
-					Name  string `json:"name"`
-				}
-
-				var e event
-
-				for k, v := range args {
-					switch k {
-					case "event":
-						e.Event = v.(string)
-					case "jobId":
-						e.JobId = v.(string)
-					case "name":
-						e.Name = v.(string)
-					}
-				}
-
-				switch e.Event {
-				case "progress":
-					// Add to  map[string]interface{} key data
-					err = json.Unmarshal([]byte(args["data"].(string)), args["data"])
-					if err != nil {
-						return err
-					}
-				case "completed":
-					// Add to  map[string]interface{} key returnvalue
-					err = json.Unmarshal([]byte(args["returnvalue"].(string)), args["returnvalue"])
-					if err != nil {
-						return err
-					}
-				}
-
-				// restArgs, is just args but without the event key
-				restArgs := args
-				delete(restArgs, "event")
-
-				if e.Event == "drained" {
-					qe.Emit(e.Event, id)
-				} else {
-					qe.Emit(e.Event, restArgs, id)
-					qe.Emit(e.Event+":"+e.JobId, restArgs, id)
+				if err := qe.processEvent(args, id); err != nil {
+					qe.Emit("error", fmt.Sprintf("Error processing event: %v", err))
+					continue
 				}
 			}
 		}
 	}
+}
 
+func (qe *QueueEvents) processEvent(args map[string]interface{}, id string) error {
+	// Extract the event name
+	eventName, ok := args["event"].(string)
+	if !ok {
+		return fmt.Errorf("missing or invalid 'event' field in message ID %s", id)
+	}
+
+	// Initialize event data
+	var data interface{}
+	var err error
+
+	// Handle specific events that require data unmarshaling
+	switch eventName {
+	case "progress", "completed":
+		dataKey := "data"
+		if eventName == "completed" {
+			dataKey = "returnvalue"
+		}
+		dataStr, ok := args[dataKey].(string)
+		if !ok {
+			return fmt.Errorf("missing or invalid '%s' field in message ID %s", dataKey, id)
+		}
+		// Unmarshal the JSON data
+		if err = json.Unmarshal([]byte(dataStr), &data); err != nil {
+			return fmt.Errorf("error unmarshaling '%s': %v", dataKey, err)
+		}
+		args[dataKey] = data
+	}
+
+	// Emit the event
+	qe.emitEvent(eventName, args, id)
 	return nil
+}
+
+func (qe *QueueEvents) emitEvent(eventName string, args map[string]interface{}, id string) {
+	jobId, _ := args["jobId"].(string)
+
+	if eventName == "drained" {
+		qe.Emit(eventName, id)
+	} else {
+		qe.Emit(eventName, args, id)
+		if jobId != "" {
+			qe.Emit(fmt.Sprintf("%s:%s", eventName, jobId), args, id)
+		}
+	}
 }
 
 func (qe *QueueEvents) Close() {
