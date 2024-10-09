@@ -28,19 +28,21 @@ var (
 
 type QueueIface interface {
 	eventemitter.EventEmitterIface
+	Init(name string, opts QueueOption) (*Queue, error)
 	Add(jobName string, jobData JobData, options ...WithOption) (Job, error)
+	AddBulk(jobs []QueueJob) ([]Job, error)
 	Pause() error
 	Resume()
 	IsPaused() bool
+	Drain(delayed bool) error
+	Clean(grace int, limit int, cType QueueEventType) ([]string, error)
+	Obliterate(opts ObliterateOpts) error
 	Ping() error
+	Remove(jobId string, removeChildren bool) error
+	TrimEvents(max int64) (int64, error)
 }
 
 var _ QueueIface = (*Queue)(nil)
-
-const (
-	SingleNode = 0
-	Cluster    = 1
-)
 
 type Queue struct {
 	eventemitter.EventEmitter
@@ -57,6 +59,12 @@ type QueueOption struct {
 	KeyPrefix   string
 	RedisIp     string
 	RedisPasswd string
+}
+
+type QueueJob struct {
+	Name string
+	Data JobData
+	Opts JobOptions
 }
 
 func NewQueue(name string, opts QueueOption) (*Queue, error) {
@@ -100,6 +108,7 @@ func (q *Queue) Init(name string, opts QueueOption) (*Queue, error) {
 	return nq, nil
 }
 
+// TODO: Implement repeat job logic
 func (q *Queue) Add(jobName string, jobData JobData, options ...WithOption) (Job, error) {
 	distOption := &JobOptions{}
 	var name string
@@ -135,6 +144,12 @@ func (q *Queue) Add(jobName string, jobData JobData, options ...WithOption) (Job
 	q.Emit("waiting", job)
 
 	return job, nil
+}
+
+// TODO: Implement AddBulk
+func (q *Queue) AddBulk(jobs []QueueJob) ([]Job, error) {
+	var jobArr []Job
+	return jobArr, nil
 }
 
 func (q *Queue) pause(pause bool) error {
