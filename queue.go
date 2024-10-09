@@ -16,7 +16,7 @@ import (
 type QueueIface interface {
 	eventemitter.EventEmitterIface
 	Add(jobName string, jobData JobData, options ...WithOption) (Job, error)
-	Pause()
+	Pause() error
 	Resume()
 	IsPaused() bool
 	Ping() error
@@ -109,12 +109,11 @@ func (q *Queue) Add(jobName string, jobData JobData, options ...WithOption) (Job
 
 	job, err := newJob(name, jobData, *distOption)
 	if err != nil {
-		return job, wrapError(err, "bull Add error")
+		return job, wrapError(err, "attempt to create new job failed")
 	}
-
 	jobId, err := q.addJob(job, distOption.JobId)
 	if err != nil {
-		return job, wrapError(err, "bull Add error")
+		return job, wrapError(err, "failed to add job")
 	}
 	job.Id = jobId
 
@@ -158,7 +157,6 @@ func (q *Queue) pause(pause bool) error {
 
 	rs, err := lua.Pause(client, keys, p)
 	if err != nil {
-		fmt.Println("Error: ", err)
 		return wrapError(err, "failed to pause or resume queue")
 	}
 	fmt.Println("Result: ", rs)
@@ -166,9 +164,13 @@ func (q *Queue) pause(pause bool) error {
 	return nil
 }
 
-func (q *Queue) Pause() {
-	q.pause(true)
+func (q *Queue) Pause() error {
+	err := q.pause(true)
+	if err != nil {
+		return wrapError(err, "failed to pause queue")
+	}
 	q.Emit("paused")
+	return nil
 }
 
 func (q *Queue) Resume() {
@@ -208,17 +210,17 @@ func (q *Queue) addJob(job Job, jobId string) (string, error) {
 
 	msgPackedArgs, err := msgpack.Marshal(args)
 	if err != nil {
-		return "nil", err
+		return "nil", fmt.Errorf("failed to marshal args: %v", err)
 	}
 
 	msgPackedOpts, err := msgpack.Marshal(job.Opts)
 	if err != nil {
-		return "nil", err
+		return "nil", fmt.Errorf("failed to marshal opts: %v", err)
 	}
 
 	givenJobId, err := lua.AddJob(rdb, keys, msgPackedArgs, job.Data, msgPackedOpts)
 	if err != nil {
-		return "nil", err
+		return "nil", fmt.Errorf("failed to add job: %v", err)
 	}
 
 	jobIdStr := givenJobId.(string)

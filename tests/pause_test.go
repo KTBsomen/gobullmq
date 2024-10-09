@@ -2,6 +2,7 @@ package queue_test
 
 import (
 	"context"
+	"github.com/go-redis/redis/v8"
 	"testing"
 
 	"github.com/google/uuid"
@@ -13,7 +14,7 @@ var ctx = context.Background()
 func TestPauseQueue(t *testing.T) {
 	var q *gobullmq.Queue
 	var queueName string
-	// var qEvents *gobullmq.QueueEvents
+	var qEvents *gobullmq.QueueEvents
 
 	beforeEach := func() {
 		queueName = "test-" + uuid.New().String()
@@ -21,15 +22,18 @@ func TestPauseQueue(t *testing.T) {
 			RedisIp:     "127.0.0.1:6379",
 			RedisPasswd: "",
 		})
-		// qEvents = gobullmq.NewQueueEvents(queueName, gobullmq.QueueEventsOptions{}, gobullmq.RedisConnection{
-		// 	Addr:     "127.0.0.1:6379",
-		// 	Password: "",
-		// })
+		qEvents = gobullmq.NewQueueEvents(context.Background(), queueName, gobullmq.QueueEventsOptions{
+			RedisClient: *redis.NewClient(&redis.Options{
+				Addr:     "127.0.0.1:6379",
+				Password: "",
+				DB:       0,
+			}),
+		})
 	}
 
 	afterEach := func() {
 		// q.Close()
-		//qEvents.Close()
+		qEvents.Close()
 		//utils.RemoveAllQueueData(connection, queueName)
 	}
 
