@@ -28,9 +28,11 @@ type QueueEvents struct {
 	closing     bool
 	redisClient redis.Client
 	ctx         context.Context
+	cancel      context.CancelFunc
 	Prefix      string
 	KeyPrefix   string
 	mutex       sync.Mutex
+	wg          sync.WaitGroup
 	Opts        struct {
 		LastEventId string
 	}
@@ -46,13 +48,16 @@ type QueueEventsOptions struct {
 // And do it safely
 
 func NewQueueEvents(ctx context.Context, name string, opts QueueEventsOptions) *QueueEvents {
+	ctx, cancel := context.WithCancel(ctx)
+
 	qe := &QueueEvents{
 		Name:        name,
 		Token:       uuid.New(),
 		ee:          eventemitter.NewEventEmitter(),
-		running:     opts.Autorun,
+		running:     false,
 		closing:     false,
 		ctx:         ctx,
+		cancel:      cancel,
 		redisClient: opts.RedisClient,
 	}
 
@@ -64,16 +69,12 @@ func NewQueueEvents(ctx context.Context, name string, opts QueueEventsOptions) *
 	qe.Prefix = qe.KeyPrefix
 	qe.KeyPrefix = qe.KeyPrefix + ":" + name + ":"
 
-	// connect to redis
-
 	// if autorun, run qe.run() and if it has any errors emit error event
 	if opts.Autorun {
-		go func() {
-			err := qe.Run()
-			if err != nil {
-				qe.Emit("error", fmt.Sprintf("Error running queue events: %v", err))
-			}
-		}()
+		err := qe.Run()
+		if err != nil {
+			qe.Emit("error", fmt.Sprintf("Error running queue events: %v", err))
+		}
 	}
 
 	return qe
@@ -109,9 +110,14 @@ func (qe *QueueEvents) Run() error {
 	// Set the name of the client connection to the queue name
 	client.Do(qe.ctx, "CLIENT", "SETNAME", fmt.Sprintf("%s:%s%s", qe.Prefix, base64.StdEncoding.EncodeToString([]byte(qe.Name)), ":qe"))
 
+	qe.wg.Add(1) // Add to WaitGroup
+
 	// Use a goroutine to run the async task.
 	go func() {
-		defer func() { qe.running = false }()
+		defer func() {
+			qe.running = false
+			qe.wg.Done() // Signal WaitGroup when done
+		}()
 		if err := qe.consumeEvents(client); err != nil {
 			qe.Emit("error", fmt.Sprintf("Error consuming events: %v", err))
 		}
@@ -126,14 +132,10 @@ func (qe *QueueEvents) consumeEvents(client redis.Client) error {
 	if qe.Opts.LastEventId != "" {
 		id = qe.Opts.LastEventId
 	}
-
 	for {
 		if qe.closing {
 			break
 		}
-
-		// We have some latency here, we need to fix this
-		// As we can add a job after calling run, and it will not be picked up. However, we can then call run again and it is
 
 		// https://www.dragonflydb.io/code-examples/golang-redis-xread
 		streams, err := client.XRead(qe.ctx, &redis.XReadArgs{
@@ -145,6 +147,11 @@ func (qe *QueueEvents) consumeEvents(client redis.Client) error {
 
 		if errors.Is(err, redis.Nil) {
 			continue
+		} else if errors.Is(err, context.Canceled) {
+			return nil
+		} else if err != nil {
+			// Log or handle error based on your needs
+			return err
 		}
 
 		for _, stream := range streams {
@@ -211,5 +218,7 @@ func (qe *QueueEvents) Close() {
 		return
 	}
 
+	qe.cancel()
+	qe.wg.Wait()
 	qe.running = false
 }

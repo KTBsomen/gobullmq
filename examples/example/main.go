@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/go-redis/redis/v8"
 	"go.codycody31.dev/gobullmq"
+	"time"
 )
 
 var ctx = context.Background()
@@ -26,19 +27,18 @@ func main() {
 			Password: "",
 			DB:       0,
 		}),
+		Autorun: true,
 	})
-
-	go func() {
-		err := qEvents.Run()
-		if err != nil {
-			fmt.Println(err)
-		}
-	}()
 
 	qEvents.On("added", func(args ...interface{}) {
-		fmt.Println("added")
+		fmt.Println("Added event")
 		fmt.Println(args)
 	})
+
+	//err := qEvents.Run()
+	//if err != nil {
+	//	fmt.Println(err)
+	//}
 
 	jobdata, err := json.Marshal(
 		struct {
@@ -60,7 +60,7 @@ func main() {
 		println(err.Error())
 	}
 
-	select {}
+	time.Sleep(5 * time.Second)
 
 	qEvents.Close()
 }
