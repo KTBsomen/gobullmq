@@ -13,13 +13,17 @@ import (
 	"time"
 )
 
+// QueueEventsIface is an interface for the QueueEvents struct and defines the methods that can be used to interact with the queue events
 type QueueEventsIface interface {
+	Emit(event string, args ...interface{})
+	Off(event string, listener func(...interface{}))
 	On(event string, listener func(...interface{}))
 	Once(event string, listener func(...interface{}))
-	Emit(event string, args ...interface{})
-	RemoveListener(event string, listener func(...interface{}))
-	RemoveAllListeners(event string)
+	Run() error
+	Close()
 }
+
+var _ QueueEventsIface = (*QueueEvents)(nil)
 
 type QueueEvents struct {
 	Name        string                     // Name of the queue
@@ -46,7 +50,7 @@ type QueueEventsOptions struct {
 }
 
 // NewQueueEvents creates a new QueueEvents instance
-func NewQueueEvents(ctx context.Context, name string, opts QueueEventsOptions) *QueueEvents {
+func NewQueueEvents(ctx context.Context, name string, opts QueueEventsOptions) (*QueueEvents, error) {
 	ctx, cancel := context.WithCancel(ctx)
 
 	qe := &QueueEvents{
@@ -72,29 +76,34 @@ func NewQueueEvents(ctx context.Context, name string, opts QueueEventsOptions) *
 	if opts.Autorun {
 		err := qe.Run()
 		if err != nil {
-			qe.Emit("error", fmt.Sprintf("Error running queue events: %v", err))
+			return nil, fmt.Errorf("error running queue events: %v", err)
 		}
 	}
 
-	return qe
+	return qe, nil
 }
 
+// Emit emits the event with the given name and arguments
 func (qe *QueueEvents) Emit(event string, args ...interface{}) {
 	qe.ee.Emit(event, args...)
 }
 
+// Off stops listening for the event
 func (qe *QueueEvents) Off(event string, listener func(...interface{})) {
 	qe.ee.RemoveListener(event, listener)
 }
 
+// On listens for the event
 func (qe *QueueEvents) On(event string, listener func(...interface{})) {
 	qe.ee.On(event, listener)
 }
 
+// Once listens for the event only once
 func (qe *QueueEvents) Once(event string, listener func(...interface{})) {
 	qe.ee.Once(event, listener)
 }
 
+// Run starts the queue events and listens for events from the redis stream
 func (qe *QueueEvents) Run() error {
 	qe.mutex.Lock()
 	defer qe.mutex.Unlock()
@@ -126,6 +135,7 @@ func (qe *QueueEvents) Run() error {
 	return nil
 }
 
+// consumeEvents consumes events from the redis stream
 func (qe *QueueEvents) consumeEvents(client redis.Client) error {
 	eventKey := qe.KeyPrefix + "events"
 	id := "$"
@@ -167,6 +177,7 @@ func (qe *QueueEvents) consumeEvents(client redis.Client) error {
 	}
 }
 
+// processEvent processes the event with the given arguments
 func (qe *QueueEvents) processEvent(args map[string]interface{}, id string) error {
 	// Extract the event name
 	eventName, ok := args["event"].(string)
@@ -201,6 +212,7 @@ func (qe *QueueEvents) processEvent(args map[string]interface{}, id string) erro
 	return nil
 }
 
+// emitEvent emits the event with the given name and arguments
 func (qe *QueueEvents) emitEvent(eventName string, args map[string]interface{}, id string) {
 	jobId, _ := args["jobId"].(string)
 
@@ -214,6 +226,7 @@ func (qe *QueueEvents) emitEvent(eventName string, args map[string]interface{}, 
 	}
 }
 
+// Close stops the queue events
 func (qe *QueueEvents) Close() {
 	qe.mutex.Lock()
 	defer qe.mutex.Unlock()

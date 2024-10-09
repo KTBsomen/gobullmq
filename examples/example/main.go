@@ -20,7 +20,7 @@ func main() {
 		RedisIp:     "127.0.0.1:6379",
 		RedisPasswd: "",
 	})
-	qEvents = gobullmq.NewQueueEvents(context.Background(), queueName, gobullmq.QueueEventsOptions{
+	qEvents, err := gobullmq.NewQueueEvents(context.Background(), queueName, gobullmq.QueueEventsOptions{
 		RedisClient: *redis.NewClient(&redis.Options{
 			Addr:     "127.0.0.1:6379",
 			Password: "",
@@ -28,6 +28,10 @@ func main() {
 		}),
 		Autorun: true,
 	})
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 
 	qEvents.On("added", func(args ...interface{}) {
 		fmt.Println("Added event")
