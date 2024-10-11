@@ -65,6 +65,14 @@ type QueueOption struct {
 	KeyPrefix   string
 	RedisIp     string
 	RedisPasswd string
+
+	// Options for the streams used internally in BullMQ.
+	Streams struct {
+		// Options for the events stream.
+		Events struct {
+			MaxLen int64 // Max approximated length for streams. Default is 10 000 events.
+		}
+	}
 }
 
 type QueueJob struct {
@@ -101,6 +109,14 @@ func NewQueue(name string, opts QueueOption) (*Queue, error) {
 	q.Client, err = redisAction.Init(redisIp, redisPasswd, redisMode)
 	if err != nil {
 		return nil, wrapError(err, "bull Init error")
+	}
+
+	// TODO: Get the default values for the job options and store them in jobOpts
+
+	if opts.Streams.Events.MaxLen != 0 {
+		q.Client.XTrim(q.ctx, q.toKey("events"), opts.Streams.Events.MaxLen)
+	} else {
+		q.Client.HSet(q.ctx, q.toKey("meta"), "opts.maxLenEvents", "10000")
 	}
 
 	return q, nil
