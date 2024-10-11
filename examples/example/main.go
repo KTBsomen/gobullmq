@@ -70,7 +70,7 @@ func main() {
 	}
 
 	_, err = q.Add("test", jobdata, gobullmq.WithRepeat(gobullmq.JobRepeatOptions{
-		Pattern: "0 15 3 * * *",
+		Every: 1000,
 	}))
 	if err != nil {
 		println(err.Error())

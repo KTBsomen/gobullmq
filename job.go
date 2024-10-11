@@ -32,56 +32,38 @@ type JobData interface{}
 
 // 这个结构也是需要被序列化的
 type JobOptions struct {
-	Priority         int    `json:"priority"`
-	RemoveOnComplete bool   `json:"removeOnComplete"`
-	RemoveOnFail     bool   `json:"removeOnFail"`
-	Attempts         int    `json:"attempts"`
-	Delay            int    `json:"delay"`
-	TimeStamp        int64  `json:"timestamp"`
-	Lifo             string `json:"lifo"`
-	JobId            string `json:"jobId"`
-	RepeatJobKey     string `json:"repeatJobKey"`
+	Priority         int    `json:"priority,omitempty" msgpack:"priority,omitempty"`
+	RemoveOnComplete bool   `json:"removeOnComplete,omitempty" msgpack:"removeOnComplete,omitempty"`
+	RemoveOnFail     bool   `json:"removeOnFail,omitempty" msgpack:"removeOnFail,omitempty"`
+	Attempts         int    `json:"attempts,omitempty" msgpack:"attempts,omitempty"`
+	Delay            int    `json:"delay,omitempty" msgpack:"delay,omitempty"`
+	TimeStamp        int64  `json:"timestamp,omitempty" msgpack:"timestamp,omitempty"`
+	Lifo             string `json:"lifo,omitempty" msgpack:"lifo,omitempty"`
+	JobId            string `json:"jobId,omitempty" msgpack:"jobId,omitempty"`
+	RepeatJobKey     string `json:"repeatJobKey,omitempty" msgpack:"repeatJobKey,omitempty"`
 
-	Repeat JobRepeatOptions `json:"repeat"`
+	Repeat JobRepeatOptions `json:"repeat,omitempty" msgpack:"repeat,omitempty"`
 }
 
 type JobRepeatOptions struct {
 	// ParserOptions
-	CurrentDate  time.Time `json:"currentDate"`
-	StartDate    time.Time `json:"startDate"`
-	EndDate      time.Time `json:"endDate"`
-	UTC          bool      `json:"utc"`
-	TZ           string    `json:"tz"`
-	NthDayOfWeek int       `json:"nthDayOfWeek"`
+	CurrentDate  *time.Time `json:"currentDate,omitempty" msgpack:"currentDate,omitempty"`
+	StartDate    *time.Time `json:"startDate,omitempty" msgpack:"startDate,omitempty"`
+	EndDate      *time.Time `json:"endDate,omitempty" msgpack:"endDate,omitempty"`
+	UTC          bool       `json:"utc,omitempty" msgpack:"utc,omitempty"`
+	TZ           string     `json:"tz,omitempty" msgpack:"tz,omitempty"`
+	NthDayOfWeek int        `json:"nthDayOfWeek,omitempty" msgpack:"nthDayOfWeek,omitempty"`
 
 	// RepeatOptions
-	Pattern     string `json:"pattern"`     // A repeat pattern
-	Limit       int    `json:"limit"`       // Number of times the job should repeat at max.
-	Every       int    `json:"every"`       // Repeat after this amount of milliseconds (`pattern` setting cannot be used together with this setting.)
-	Immediately bool   `json:"immediately"` // Repeated job should start right now (work only with every settings)
-	Count       int    `json:"count"`       // The start value for the repeat iteration count.
-	PrevMillis  int    `json:"prevMillis"`
-	Offset      int    `json:"offset"`
-	JobId       string `json:"jobId"`
-}
-
-type JobFilteredRepeatOptions struct {
-	// ParserOptions
-	CurrentDate  time.Time `json:"currentDate"`
-	StartDate    time.Time `json:"startDate"`
-	EndDate      time.Time `json:"endDate"`
-	UTC          bool      `json:"utc"`
-	TZ           string    `json:"tz"`
-	NthDayOfWeek int       `json:"nthDayOfWeek"`
-
-	// RepeatOptions
-	Pattern    string `json:"pattern"` // A repeat pattern
-	Limit      int    `json:"limit"`   // Number of times the job should repeat at max.
-	Every      int    `json:"every"`   // Repeat after this amount of milliseconds (`pattern` setting cannot be used together with this setting.)
-	Count      int    `json:"count"`   // The start value for the repeat iteration count.
-	PrevMillis int    `json:"prevMillis"`
-	Offset     int    `json:"offset"`
-	JobId      string `json:"jobId"`
+	Pattern     string `json:"pattern,omitempty" msgpack:"pattern,omitempty"`         // A repeat pattern
+	Limit       int    `json:"limit,omitempty" msgpack:"limit,omitempty"`             // Number of times the job should repeat at max.
+	Every       int    `json:"every,omitempty" msgpack:"every,omitempty"`             // Repeat after this amount of milliseconds (`pattern` setting cannot be used together with this setting.)
+	Immediately bool   `json:"immediately,omitempty" msgpack:"immediately,omitempty"` // Repeated job should start right now (work only with every settings)
+	Count       int    `json:"count,omitempty" msgpack:"count,omitempty"`             // The start value for the repeat iteration count.
+	// omit from json output always
+	PrevMillis int    `json:"prevMillis,omitempty" msgpack:"prevMillis,omitempty"`
+	Offset     int    `json:"offset,omitempty" msgpack:"offset,omitempty"`
+	JobId      string `json:"jobId,omitempty" msgpack:"jobId,omitempty"`
 }
 
 type Job struct {

@@ -238,7 +238,6 @@ func (q *Queue) addJob(job Job, jobId string) (string, error) {
 	keys = append(keys, q.KeyPrefix+"events")
 	keys = append(keys, q.KeyPrefix+"pc")
 
-	// args := q.getArgs(job)
 	args := make([]interface{}, 0)
 	args = append(args, q.KeyPrefix)
 	args = append(args, jobId)
@@ -254,33 +253,9 @@ func (q *Queue) addJob(job Job, jobId string) (string, error) {
 		return "nil", fmt.Errorf("failed to marshal args: %v", err)
 	}
 
-	var msgPackedOpts []byte
-	//	const repeat = {
-	//		...opts.repeat,
-	//	};
-	//
-	//	if (repeat.startDate) {
-	//		repeat.startDate = +new Date(repeat.startDate);
-	//	}
-	//	if (repeat.endDate) {
-	//		repeat.endDate = +new Date(repeat.endDate);
-	//	}
-	//
-	//	encodedOpts = pack({
-	//		...opts,
-	//			repeat,
-	//	});
-
-	if job.Opts.Repeat.Every != 0 || job.Opts.Repeat.Pattern != "" {
-		msgPackedOpts, err = msgpack.Marshal(job.Opts)
-		if err != nil {
-			return "nil", fmt.Errorf("failed to marshal opts: %v", err)
-		}
-	} else {
-		msgPackedOpts, err = msgpack.Marshal(job.Opts)
-		if err != nil {
-			return "nil", fmt.Errorf("failed to marshal opts: %v", err)
-		}
+	msgPackedOpts, err := msgpack.Marshal(job.Opts)
+	if err != nil {
+		return "nil", fmt.Errorf("failed to marshal opts: %v", err)
 	}
 
 	givenJobId, err := lua.AddJob(rdb, keys, msgPackedArgs, job.Data, msgPackedOpts)
@@ -310,7 +285,7 @@ func (q *Queue) addRepeatableJob(name string, jobData JobData, opts JobOptions, 
 
 	now := time.Now().UnixNano() / int64(time.Millisecond)
 
-	if !opts.Repeat.EndDate.IsZero() && now > opts.Repeat.EndDate.UnixNano()/int64(time.Millisecond) {
+	if opts.Repeat.EndDate != nil && now > opts.Repeat.EndDate.UnixNano()/int64(time.Millisecond) {
 		return Job{}, wrapError(nil, "repeatable job end date exceeded")
 	}
 
@@ -425,7 +400,7 @@ func GetMD5Hash(text string) string {
 
 func getRepeatKey(name string, repeat JobRepeatOptions) string {
 	var endDate string
-	if !repeat.EndDate.IsZero() {
+	if repeat.EndDate != nil {
 		endDate = strconv.FormatInt(repeat.EndDate.UnixNano()/int64(time.Millisecond), 10)
 	} else {
 		endDate = ""
