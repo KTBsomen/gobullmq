@@ -54,17 +54,24 @@ func main() {
 		return
 	}
 
-	j, err := q.Add("test", jobdata)
+	_, err = q.Add("test", jobdata)
 	if err != nil {
 		println(err.Error())
 	}
 
-	err = q.Remove(j.Id, true)
+	//err = q.Remove(j.Id, true)
+	//if err != nil {
+	//	println(err.Error())
+	//}
+
+	_, err = q.Add("test", jobdata)
 	if err != nil {
 		println(err.Error())
 	}
 
-	j, err = q.Add("test", jobdata)
+	_, err = q.Add("test", jobdata, gobullmq.WithRepeat(gobullmq.JobRepeatOptions{
+		Pattern: "0 15 3 * * *",
+	}))
 	if err != nil {
 		println(err.Error())
 	}

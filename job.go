@@ -40,6 +40,48 @@ type JobOptions struct {
 	TimeStamp        int64  `json:"timestamp"`
 	Lifo             string `json:"lifo"`
 	JobId            string `json:"jobId"`
+	RepeatJobKey     string `json:"repeatJobKey"`
+
+	Repeat JobRepeatOptions `json:"repeat"`
+}
+
+type JobRepeatOptions struct {
+	// ParserOptions
+	CurrentDate  time.Time `json:"currentDate"`
+	StartDate    time.Time `json:"startDate"`
+	EndDate      time.Time `json:"endDate"`
+	UTC          bool      `json:"utc"`
+	TZ           string    `json:"tz"`
+	NthDayOfWeek int       `json:"nthDayOfWeek"`
+
+	// RepeatOptions
+	Pattern     string `json:"pattern"`     // A repeat pattern
+	Limit       int    `json:"limit"`       // Number of times the job should repeat at max.
+	Every       int    `json:"every"`       // Repeat after this amount of milliseconds (`pattern` setting cannot be used together with this setting.)
+	Immediately bool   `json:"immediately"` // Repeated job should start right now (work only with every settings)
+	Count       int    `json:"count"`       // The start value for the repeat iteration count.
+	PrevMillis  int    `json:"prevMillis"`
+	Offset      int    `json:"offset"`
+	JobId       string `json:"jobId"`
+}
+
+type JobFilteredRepeatOptions struct {
+	// ParserOptions
+	CurrentDate  time.Time `json:"currentDate"`
+	StartDate    time.Time `json:"startDate"`
+	EndDate      time.Time `json:"endDate"`
+	UTC          bool      `json:"utc"`
+	TZ           string    `json:"tz"`
+	NthDayOfWeek int       `json:"nthDayOfWeek"`
+
+	// RepeatOptions
+	Pattern    string `json:"pattern"` // A repeat pattern
+	Limit      int    `json:"limit"`   // Number of times the job should repeat at max.
+	Every      int    `json:"every"`   // Repeat after this amount of milliseconds (`pattern` setting cannot be used together with this setting.)
+	Count      int    `json:"count"`   // The start value for the repeat iteration count.
+	PrevMillis int    `json:"prevMillis"`
+	Offset     int    `json:"offset"`
+	JobId      string `json:"jobId"`
 }
 
 type Job struct {

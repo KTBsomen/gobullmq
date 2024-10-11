@@ -2,16 +2,22 @@ package gobullmq
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"github.com/go-redis/redis/v8"
+	"github.com/vmihailenco/msgpack/v5"
+	"math"
+	"strconv"
 	"time"
 
 	eventemitter "go.codycody31.dev/gobullmq/internal/eventEmitter"
 	"go.codycody31.dev/gobullmq/internal/lua"
 	"go.codycody31.dev/gobullmq/internal/redisAction"
 
-	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
-	"github.com/vmihailenco/msgpack/v5"
+	"github.com/gorhill/cronexpr"
 )
 
 type QueueEventType string
@@ -108,7 +114,7 @@ func (q *Queue) Init(name string, opts QueueOption) (*Queue, error) {
 	return nq, nil
 }
 
-// TODO: Implement repeat job logic
+// TODO: Test repeat job logic
 func (q *Queue) Add(jobName string, jobData JobData, options ...WithOption) (Job, error) {
 	distOption := &JobOptions{}
 	var name string
@@ -129,6 +135,10 @@ func (q *Queue) Add(jobName string, jobData JobData, options ...WithOption) (Job
 		name = _DEFAULT_JOB_NAME
 	} else {
 		name = jobName
+	}
+
+	if distOption.Repeat.Every != 0 || distOption.Repeat.Pattern != "" {
+		return q.addRepeatableJob(name, jobData, *distOption, true)
 	}
 
 	job, err := newJob(name, jobData, *distOption)
@@ -234,18 +244,43 @@ func (q *Queue) addJob(job Job, jobId string) (string, error) {
 	args = append(args, jobId)
 	args = append(args, job.Name)
 	args = append(args, job.TimeStamp)
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 4; i++ {
 		args = append(args, nil)
 	}
+	args = append(args, job.Opts.RepeatJobKey)
 
 	msgPackedArgs, err := msgpack.Marshal(args)
 	if err != nil {
 		return "nil", fmt.Errorf("failed to marshal args: %v", err)
 	}
 
-	msgPackedOpts, err := msgpack.Marshal(job.Opts)
-	if err != nil {
-		return "nil", fmt.Errorf("failed to marshal opts: %v", err)
+	var msgPackedOpts []byte
+	//	const repeat = {
+	//		...opts.repeat,
+	//	};
+	//
+	//	if (repeat.startDate) {
+	//		repeat.startDate = +new Date(repeat.startDate);
+	//	}
+	//	if (repeat.endDate) {
+	//		repeat.endDate = +new Date(repeat.endDate);
+	//	}
+	//
+	//	encodedOpts = pack({
+	//		...opts,
+	//			repeat,
+	//	});
+
+	if job.Opts.Repeat.Every != 0 || job.Opts.Repeat.Pattern != "" {
+		msgPackedOpts, err = msgpack.Marshal(job.Opts)
+		if err != nil {
+			return "nil", fmt.Errorf("failed to marshal opts: %v", err)
+		}
+	} else {
+		msgPackedOpts, err = msgpack.Marshal(job.Opts)
+		if err != nil {
+			return "nil", fmt.Errorf("failed to marshal opts: %v", err)
+		}
 	}
 
 	givenJobId, err := lua.AddJob(rdb, keys, msgPackedArgs, job.Data, msgPackedOpts)
@@ -257,6 +292,224 @@ func (q *Queue) addJob(job Job, jobId string) (string, error) {
 
 	return jobIdStr, nil
 }
+
+// TODO: Finish
+func (q *Queue) addRepeatableJob(name string, jobData JobData, opts JobOptions, skipCheckExists bool) (Job, error) {
+	prevMillis := opts.Repeat.PrevMillis
+	currentCount := opts.Repeat.Count
+
+	if currentCount == 0 {
+		currentCount = 1
+	} else {
+		currentCount++
+	}
+
+	if limit := opts.Repeat.Limit; limit > 0 && currentCount > limit {
+		return Job{}, wrapError(nil, "repeatable job limit exceeded")
+	}
+
+	now := time.Now().UnixNano() / int64(time.Millisecond)
+
+	if !opts.Repeat.EndDate.IsZero() && now > opts.Repeat.EndDate.UnixNano()/int64(time.Millisecond) {
+		return Job{}, wrapError(nil, "repeatable job end date exceeded")
+	}
+
+	if int64(prevMillis) > now {
+		now = int64(prevMillis)
+	}
+
+	nextMillis, err := repeatStrategy(now, opts)
+	if err != nil {
+		return Job{}, wrapError(err, "failed to calculate nextMillis")
+	}
+
+	pattern := opts.Repeat.Pattern
+	hasImmediately := false
+
+	if (opts.Repeat.Every != 0 || pattern != "") && opts.Repeat.Immediately {
+		hasImmediately = true
+	}
+
+	var offset int64
+	if hasImmediately {
+		offset = now - nextMillis
+	} else {
+		offset = 0
+	}
+
+	if nextMillis > 0 {
+		//if (!prevMillis && opts.jobId) {
+		//	repeatOpts.jobId = opts.jobId;
+		//}
+		if prevMillis != 0 && opts.JobId != "" {
+			opts.Repeat.JobId = opts.JobId
+		}
+
+		repeatJobKey := getRepeatKey(name, opts.Repeat)
+
+		repeatableExists := true
+
+		if !skipCheckExists {
+			f, err := q.Client.ZScore(q.ctx, q.toKey("repeat"), repeatJobKey).Result()
+			if err != nil {
+				repeatableExists = false
+			}
+
+			if f == 0 {
+				repeatableExists = false
+			}
+		}
+
+		if repeatableExists {
+			jobId, err := getRepeatJobId(name, nextMillis, GetMD5Hash(repeatJobKey), opts.JobId)
+			if err != nil {
+				return Job{}, wrapError(err, "failed to get repeatable job id")
+			}
+
+			now := time.Now().UnixNano() / int64(time.Millisecond)
+			delay := nextMillis + offset - now
+
+			opts.JobId = jobId
+			opts.Delay = int(delay) // delay < 0 || hasImmediately ? 0 : delay
+			opts.TimeStamp = now
+			opts.Repeat.PrevMillis = int(nextMillis)
+			opts.RepeatJobKey = repeatJobKey
+			opts.Repeat.Count = currentCount
+
+			// TODO: Convert opts.Repeat from pointer to value
+
+			q.Client.ZAdd(q.ctx, q.toKey("repeat"), &redis.Z{
+				Score:  float64(nextMillis),
+				Member: repeatJobKey,
+			})
+
+			fmt.Println("Repeatable job added: ", jobId)
+			// name, nextMillis, repeatJobKey, opts, jobData, currentCount, hasImmediately
+			fmt.Println("name:", name)
+			fmt.Println("nextMillis:", nextMillis)
+			fmt.Println("repeatJobKey:", repeatJobKey)
+			j, _ := json.Marshal(opts)
+			fmt.Println("opts:", string(j))
+			fmt.Println("currentCount:", currentCount)
+			fmt.Println("hasImmediately:", hasImmediately)
+
+			job, err := newJob(name, jobData, opts)
+			if err != nil {
+				return job, wrapError(err, "attempt to create new job failed")
+			}
+			_, err = q.addJob(job, jobId)
+			if err != nil {
+				return job, wrapError(err, "failed to add repeatable job")
+			}
+
+			q.Emit("waiting", job)
+
+			return job, nil
+		} else {
+			return Job{}, wrapError(nil, "repeatable job does not exist")
+		}
+	} else {
+		return Job{}, wrapError(nil, "repeatable job nextMillis is invalid")
+	}
+}
+
+func getRepeatJobId(name string, nextMillis int64, namespace string, jobId string) (string, error) {
+	checksum := GetMD5Hash(fmt.Sprintf("%s:%d:%s", name, jobId, namespace))
+	return fmt.Sprintf("repeat:%s:%s", checksum, strconv.FormatInt(nextMillis, 10)), nil
+}
+
+func GetMD5Hash(text string) string {
+	hash := md5.Sum([]byte(text))
+	return hex.EncodeToString(hash[:])
+}
+
+func getRepeatKey(name string, repeat JobRepeatOptions) string {
+	var endDate string
+	if !repeat.EndDate.IsZero() {
+		endDate = strconv.FormatInt(repeat.EndDate.UnixNano()/int64(time.Millisecond), 10)
+	} else {
+		endDate = ""
+	}
+
+	tz := repeat.TZ
+	pattern := repeat.Pattern
+	suffix := pattern
+	if suffix == "" {
+		suffix = strconv.Itoa(repeat.Every)
+	}
+
+	jobId := repeat.JobId
+
+	return fmt.Sprintf("%s:%s:%s:%s:%s", name, jobId, endDate, tz, suffix)
+}
+
+func repeatStrategy(millis int64, opts JobOptions) (int64, error) {
+	ropts := opts.Repeat
+	pattern := ropts.Pattern
+
+	if pattern != "" && ropts.Every != 0 {
+		return 0, fmt.Errorf("both .pattern and .every options are defined for this repeatable job")
+	}
+
+	if ropts.Every != 0 {
+		expr := math.Floor(float64(millis/int64(ropts.Every)))*float64(ropts.Every) + func() float64 {
+			if ropts.Immediately {
+				return 0
+			}
+			return float64(ropts.Every)
+		}()
+		return int64(expr), nil
+	}
+
+	// Calc currentData based of opts
+	var currentDate time.Time
+	if !ropts.StartDate.IsZero() {
+		startDate, _ := time.Parse(time.RFC3339, ropts.StartDate.String())
+		if startDate.After(time.Unix(millis/1000, 0)) {
+			currentDate = startDate
+		} else {
+			currentDate = time.Unix(millis/1000, 0)
+		}
+	} else {
+		currentDate = time.Unix(millis/1000, 0)
+	}
+
+	// Get interval next time
+	nextTime := cronexpr.MustParse(pattern).Next(currentDate)
+
+	return nextTime.UnixNano() / int64(time.Millisecond), nil
+}
+
+//export const getNextMillis = (millis: number, opts: RepeatOptions): number = > {
+//const pattern = opts.pattern;
+//if (pattern && opts.every) {
+//throw new Error(
+//'Both .pattern and .every options are defined for this repeatable job',
+//);
+//}
+//
+//if (opts.every) {
+//return (
+//Math.floor(millis / opts.every) * opts.every +
+//(opts.immediately ? 0: opts.every)
+//);
+//}
+//
+//const currentDate =
+//opts.startDate && new Date(opts.startDate) > new Date(millis)
+//? new Date(opts.startDate)
+//: new Date(millis);
+//const interval = parseExpression(pattern, {
+//...opts,
+//currentDate,
+//});
+//
+//try {
+//return interval.next().getTime();
+//} catch (e) {
+//// Ignore error
+//}
+//}
 
 func (q *Queue) Drain(delayed bool) error {
 	keys := []string{

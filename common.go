@@ -65,3 +65,12 @@ func WithJobId(id string) WithOption {
 		o.JobId = id
 	}
 }
+
+func WithRepeat(repeat JobRepeatOptions) WithOption {
+	return func(o *JobOptions) {
+		if o == nil {
+			return
+		}
+		o.Repeat = repeat
+	}
+}
