@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"github.com/go-redis/redis/v8"
 	"github.com/vmihailenco/msgpack/v5"
@@ -373,16 +372,6 @@ func (q *Queue) addRepeatableJob(name string, jobData JobData, opts JobOptions, 
 				Score:  float64(nextMillis),
 				Member: repeatJobKey,
 			})
-
-			fmt.Println("Repeatable job added: ", jobId)
-			// name, nextMillis, repeatJobKey, opts, jobData, currentCount, hasImmediately
-			fmt.Println("name:", name)
-			fmt.Println("nextMillis:", nextMillis)
-			fmt.Println("repeatJobKey:", repeatJobKey)
-			j, _ := json.Marshal(opts)
-			fmt.Println("opts:", string(j))
-			fmt.Println("currentCount:", currentCount)
-			fmt.Println("hasImmediately:", hasImmediately)
 
 			job, err := newJob(name, jobData, opts)
 			if err != nil {
