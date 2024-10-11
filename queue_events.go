@@ -125,9 +125,7 @@ func (qe *QueueEvents) Run() error {
 			qe.wg.Done()
 		}()
 		if err := qe.consumeEvents(client); err != nil {
-			// Handle critical errors: log and possibly shut down
 			qe.Emit("error", fmt.Sprintf("Critical error in consumeEvents: %v", err))
-			// Optionally, you can decide to cancel the context to stop other operations
 			qe.cancel()
 		}
 	}()

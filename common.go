@@ -1,9 +1,9 @@
 package gobullmq
 
-type WithOption func(o *JobOptions)
+import "go.codycody31.dev/gobullmq/types"
 
-func WithPriorityOp(priority int) WithOption {
-	return func(o *JobOptions) {
+func QueueWithPriorityOp(priority int) types.QueueWithOption {
+	return func(o *types.JobOptions) {
 		if o == nil {
 			return
 		}
@@ -11,8 +11,8 @@ func WithPriorityOp(priority int) WithOption {
 	}
 }
 
-func WithRemoveOnCompleteOp(flag bool) WithOption {
-	return func(o *JobOptions) {
+func QueueWithRemoveOnCompleteOp(flag bool) types.QueueWithOption {
+	return func(o *types.JobOptions) {
 		if o == nil {
 			return
 		}
@@ -20,8 +20,8 @@ func WithRemoveOnCompleteOp(flag bool) WithOption {
 	}
 }
 
-func WithRemoveOnFailOp(flag bool) WithOption {
-	return func(o *JobOptions) {
+func QueueWithRemoveOnFailOp(flag bool) types.QueueWithOption {
+	return func(o *types.JobOptions) {
 		if o == nil {
 			return
 		}
@@ -29,8 +29,8 @@ func WithRemoveOnFailOp(flag bool) WithOption {
 	}
 }
 
-func WithAttemptsOp(times int) WithOption {
-	return func(o *JobOptions) {
+func QueueWithAttemptsOp(times int) types.QueueWithOption {
+	return func(o *types.JobOptions) {
 		if o == nil {
 			return
 		}
@@ -38,8 +38,8 @@ func WithAttemptsOp(times int) WithOption {
 	}
 }
 
-func WithDelayOp(delayTime int) WithOption {
-	return func(o *JobOptions) {
+func QueueWithDelayOp(delayTime int) types.QueueWithOption {
+	return func(o *types.JobOptions) {
 		if o == nil {
 			return
 		}
@@ -48,8 +48,8 @@ func WithDelayOp(delayTime int) WithOption {
 }
 
 // WithTimeStamp timeStamp by time.Now().UnixMilli()
-func WithTimeStamp(timeStamp int64) WithOption {
-	return func(o *JobOptions) {
+func QueueWithTimeStamp(timeStamp int64) types.QueueWithOption {
+	return func(o *types.JobOptions) {
 		if o == nil {
 			return
 		}
@@ -57,8 +57,8 @@ func WithTimeStamp(timeStamp int64) WithOption {
 	}
 }
 
-func WithJobId(id string) WithOption {
-	return func(o *JobOptions) {
+func QueueWithJobId(id string) types.QueueWithOption {
+	return func(o *types.JobOptions) {
 		if o == nil {
 			return
 		}
@@ -66,8 +66,8 @@ func WithJobId(id string) WithOption {
 	}
 }
 
-func WithRepeat(repeat JobRepeatOptions) WithOption {
-	return func(o *JobOptions) {
+func QueueWithRepeat(repeat types.JobRepeatOptions) types.QueueWithOption {
+	return func(o *types.JobOptions) {
 		if o == nil {
 			return
 		}

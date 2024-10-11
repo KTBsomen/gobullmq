@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"github.com/go-redis/redis/v8"
 	"go.codycody31.dev/gobullmq"
+	"go.codycody31.dev/gobullmq/types"
+	"time"
 )
-
-var ctx = context.Background()
 
 func main() {
 	var q *gobullmq.Queue
@@ -16,7 +16,7 @@ func main() {
 	var qEvents *gobullmq.QueueEvents
 
 	queueName = "test"
-	q, _ = gobullmq.NewQueue(queueName, gobullmq.QueueOption{
+	q, _ = gobullmq.NewQueue(context.Background(), queueName, gobullmq.QueueOption{
 		RedisIp:     "127.0.0.1:6379",
 		RedisPasswd: "",
 	})
@@ -69,15 +69,14 @@ func main() {
 		println(err.Error())
 	}
 
-	_, err = q.Add("test", jobdata, gobullmq.WithRepeat(gobullmq.JobRepeatOptions{
+	_, err = q.Add("test", jobdata, gobullmq.QueueWithRepeat(types.JobRepeatOptions{
 		Every: 1000,
 	}))
 	if err != nil {
 		println(err.Error())
 	}
 
-	select {}
-	//time.Sleep(5 * time.Second)
+	time.Sleep(5 * time.Second)
 
 	qEvents.Close()
 }

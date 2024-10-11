@@ -2,13 +2,12 @@ package gobullmq
 
 import (
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"fmt"
 	"github.com/go-redis/redis/v8"
 	"github.com/vmihailenco/msgpack/v5"
-	"math"
-	"strconv"
+	"go.codycody31.dev/gobullmq/internal/utils"
+	"go.codycody31.dev/gobullmq/internal/utils/repeat"
+	"go.codycody31.dev/gobullmq/types"
 	"time"
 
 	eventemitter "go.codycody31.dev/gobullmq/internal/eventEmitter"
@@ -16,31 +15,17 @@ import (
 	"go.codycody31.dev/gobullmq/internal/redisAction"
 
 	"github.com/google/uuid"
-	"github.com/gorhill/cronexpr"
-)
-
-type QueueEventType string
-
-var (
-	QueueEventCompleted   QueueEventType = "completed"
-	QueueEventWait        QueueEventType = "wait"
-	QueueEventActive      QueueEventType = "active"
-	QueueEventPaused      QueueEventType = "paused"
-	QueueEventPrioritized QueueEventType = "prioritized"
-	QueueEventDelayed     QueueEventType = "delayed"
-	QueueEventFailed      QueueEventType = "failed"
 )
 
 type QueueIface interface {
 	eventemitter.EventEmitterIface
-	Init(name string, opts QueueOption) (*Queue, error)
-	Add(jobName string, jobData JobData, options ...WithOption) (Job, error)
-	AddBulk(jobs []QueueJob) ([]Job, error)
+	Init(ctx context.Context, name string, opts QueueOption) (*Queue, error)
+	Add(jobName string, jobData types.JobData, options ...types.QueueWithOption) (types.Job, error)
 	Pause() error
-	Resume()
+	Resume() error
 	IsPaused() bool
 	Drain(delayed bool) error
-	Clean(grace int, limit int, cType QueueEventType) ([]string, error)
+	Clean(grace int, limit int, cType types.QueueEventType) ([]string, error)
 	Obliterate(opts ObliterateOpts) error
 	Ping() error
 	Remove(jobId string, removeChildren bool) error
@@ -76,15 +61,15 @@ type QueueOption struct {
 
 type QueueJob struct {
 	Name string
-	Data JobData
-	Opts JobOptions
+	Data types.JobData
+	Opts types.JobOptions
 }
 
-func NewQueue(name string, opts QueueOption) (*Queue, error) {
+func NewQueue(ctx context.Context, name string, opts QueueOption) (*Queue, error) {
 	q := &Queue{
 		Name:  name,
 		Token: uuid.New(),
-		ctx:   context.Background(), // TODO: Take input of context
+		ctx:   ctx,
 	}
 
 	q.EventEmitter.Init()
@@ -121,8 +106,8 @@ func NewQueue(name string, opts QueueOption) (*Queue, error) {
 	return q, nil
 }
 
-func (q *Queue) Init(name string, opts QueueOption) (*Queue, error) {
-	nq, err := NewQueue(name, opts)
+func (q *Queue) Init(ctx context.Context, name string, opts QueueOption) (*Queue, error) {
+	nq, err := NewQueue(ctx, name, opts)
 	if err != nil {
 		return nil, wrapError(err, "bull Init error")
 	}
@@ -130,8 +115,8 @@ func (q *Queue) Init(name string, opts QueueOption) (*Queue, error) {
 }
 
 // TODO: Test repeat job logic
-func (q *Queue) Add(jobName string, jobData JobData, options ...WithOption) (Job, error) {
-	distOption := &JobOptions{}
+func (q *Queue) Add(jobName string, jobData types.JobData, options ...types.QueueWithOption) (types.Job, error) {
+	distOption := &types.JobOptions{}
 	var name string
 
 	for _, withOptionFunc := range options {
@@ -140,7 +125,7 @@ func (q *Queue) Add(jobName string, jobData JobData, options ...WithOption) (Job
 
 	if distOption.JobId != "" {
 		if distOption.JobId == "0" || (distOption.JobId[0] == '0' && distOption.JobId[1] != ':') {
-			return Job{}, wrapError(nil, "JobId cannot be '0' or start with 0:")
+			return types.Job{}, wrapError(nil, "JobId cannot be '0' or start with 0:")
 		}
 	}
 
@@ -169,12 +154,6 @@ func (q *Queue) Add(jobName string, jobData JobData, options ...WithOption) (Job
 	q.Emit("waiting", job)
 
 	return job, nil
-}
-
-// TODO: Implement AddBulk
-func (q *Queue) AddBulk(jobs []QueueJob) ([]Job, error) {
-	var jobArr []Job
-	return jobArr, nil
 }
 
 func (q *Queue) pause(pause bool) error {
@@ -228,9 +207,13 @@ func (q *Queue) Pause() error {
 	return nil
 }
 
-func (q *Queue) Resume() {
-	q.pause(false)
+func (q *Queue) Resume() error {
+	err := q.pause(false)
+	if err != nil {
+		return wrapError(err, "failed to resume queue")
+	}
 	q.Emit("resumed")
+	return nil
 }
 
 func (q *Queue) IsPaused() bool {
@@ -239,7 +222,7 @@ func (q *Queue) IsPaused() bool {
 	return pausedKeyExists
 }
 
-func (q *Queue) addJob(job Job, jobId string) (string, error) {
+func (q *Queue) addJob(job types.Job, jobId string) (string, error) {
 	rdb := q.Client
 
 	keys := make([]string, 0, 8)
@@ -283,8 +266,7 @@ func (q *Queue) addJob(job Job, jobId string) (string, error) {
 	return jobIdStr, nil
 }
 
-// TODO: Finish
-func (q *Queue) addRepeatableJob(name string, jobData JobData, opts JobOptions, skipCheckExists bool) (Job, error) {
+func (q *Queue) addRepeatableJob(name string, jobData types.JobData, opts types.JobOptions, skipCheckExists bool) (types.Job, error) {
 	prevMillis := opts.Repeat.PrevMillis
 	currentCount := opts.Repeat.Count
 
@@ -295,22 +277,22 @@ func (q *Queue) addRepeatableJob(name string, jobData JobData, opts JobOptions, 
 	}
 
 	if limit := opts.Repeat.Limit; limit > 0 && currentCount > limit {
-		return Job{}, wrapError(nil, "repeatable job limit exceeded")
+		return types.Job{}, wrapError(nil, "repeatable job limit exceeded")
 	}
 
 	now := time.Now().UnixNano() / int64(time.Millisecond)
 
 	if opts.Repeat.EndDate != nil && now > opts.Repeat.EndDate.UnixNano()/int64(time.Millisecond) {
-		return Job{}, wrapError(nil, "repeatable job end date exceeded")
+		return types.Job{}, wrapError(nil, "repeatable job end date exceeded")
 	}
 
 	if int64(prevMillis) > now {
 		now = int64(prevMillis)
 	}
 
-	nextMillis, err := repeatStrategy(now, opts)
+	nextMillis, err := repeat.Strategy(now, opts)
 	if err != nil {
-		return Job{}, wrapError(err, "failed to calculate nextMillis")
+		return types.Job{}, wrapError(err, "failed to calculate nextMillis")
 	}
 
 	pattern := opts.Repeat.Pattern
@@ -335,7 +317,7 @@ func (q *Queue) addRepeatableJob(name string, jobData JobData, opts JobOptions, 
 			opts.Repeat.JobId = opts.JobId
 		}
 
-		repeatJobKey := getRepeatKey(name, opts.Repeat)
+		repeatJobKey := repeat.GetKey(name, opts.Repeat)
 
 		repeatableExists := true
 
@@ -351,9 +333,9 @@ func (q *Queue) addRepeatableJob(name string, jobData JobData, opts JobOptions, 
 		}
 
 		if repeatableExists {
-			jobId, err := getRepeatJobId(name, nextMillis, GetMD5Hash(repeatJobKey), opts.JobId)
+			jobId, err := repeat.GetJobId(name, nextMillis, utils.MD5Hash(repeatJobKey), opts.JobId)
 			if err != nil {
-				return Job{}, wrapError(err, "failed to get repeatable job id")
+				return types.Job{}, wrapError(err, "failed to get repeatable job id")
 			}
 
 			now := time.Now().UnixNano() / int64(time.Millisecond)
@@ -386,110 +368,12 @@ func (q *Queue) addRepeatableJob(name string, jobData JobData, opts JobOptions, 
 
 			return job, nil
 		} else {
-			return Job{}, wrapError(nil, "repeatable job does not exist")
+			return types.Job{}, wrapError(nil, "repeatable job does not exist")
 		}
 	} else {
-		return Job{}, wrapError(nil, "repeatable job nextMillis is invalid")
+		return types.Job{}, wrapError(nil, "repeatable job nextMillis is invalid")
 	}
 }
-
-func getRepeatJobId(name string, nextMillis int64, namespace string, jobId string) (string, error) {
-	checksum := GetMD5Hash(fmt.Sprintf("%s:%d:%s", name, jobId, namespace))
-	return fmt.Sprintf("repeat:%s:%s", checksum, strconv.FormatInt(nextMillis, 10)), nil
-}
-
-func GetMD5Hash(text string) string {
-	hash := md5.Sum([]byte(text))
-	return hex.EncodeToString(hash[:])
-}
-
-func getRepeatKey(name string, repeat JobRepeatOptions) string {
-	var endDate string
-	if repeat.EndDate != nil {
-		endDate = strconv.FormatInt(repeat.EndDate.UnixNano()/int64(time.Millisecond), 10)
-	} else {
-		endDate = ""
-	}
-
-	tz := repeat.TZ
-	pattern := repeat.Pattern
-	suffix := pattern
-	if suffix == "" {
-		suffix = strconv.Itoa(repeat.Every)
-	}
-
-	jobId := repeat.JobId
-
-	return fmt.Sprintf("%s:%s:%s:%s:%s", name, jobId, endDate, tz, suffix)
-}
-
-func repeatStrategy(millis int64, opts JobOptions) (int64, error) {
-	ropts := opts.Repeat
-	pattern := ropts.Pattern
-
-	if pattern != "" && ropts.Every != 0 {
-		return 0, fmt.Errorf("both .pattern and .every options are defined for this repeatable job")
-	}
-
-	if ropts.Every != 0 {
-		expr := math.Floor(float64(millis/int64(ropts.Every)))*float64(ropts.Every) + func() float64 {
-			if ropts.Immediately {
-				return 0
-			}
-			return float64(ropts.Every)
-		}()
-		return int64(expr), nil
-	}
-
-	// Calc currentData based of opts
-	var currentDate time.Time
-	if !ropts.StartDate.IsZero() {
-		startDate, _ := time.Parse(time.RFC3339, ropts.StartDate.String())
-		if startDate.After(time.Unix(millis/1000, 0)) {
-			currentDate = startDate
-		} else {
-			currentDate = time.Unix(millis/1000, 0)
-		}
-	} else {
-		currentDate = time.Unix(millis/1000, 0)
-	}
-
-	// Get interval next time
-	nextTime := cronexpr.MustParse(pattern).Next(currentDate)
-
-	return nextTime.UnixNano() / int64(time.Millisecond), nil
-}
-
-//export const getNextMillis = (millis: number, opts: RepeatOptions): number = > {
-//const pattern = opts.pattern;
-//if (pattern && opts.every) {
-//throw new Error(
-//'Both .pattern and .every options are defined for this repeatable job',
-//);
-//}
-//
-//if (opts.every) {
-//return (
-//Math.floor(millis / opts.every) * opts.every +
-//(opts.immediately ? 0: opts.every)
-//);
-//}
-//
-//const currentDate =
-//opts.startDate && new Date(opts.startDate) > new Date(millis)
-//? new Date(opts.startDate)
-//: new Date(millis);
-//const interval = parseExpression(pattern, {
-//...opts,
-//currentDate,
-//});
-//
-//try {
-//return interval.next().getTime();
-//} catch (e) {
-//// Ignore error
-//}
-//}
 
 func (q *Queue) Drain(delayed bool) error {
 	keys := []string{
@@ -512,7 +396,7 @@ func (q *Queue) Drain(delayed bool) error {
 }
 
 // Clean cleans jobs from the queue (limit is the max number of jobs to clean, 0 is unlimited)
-func (q *Queue) Clean(grace int, limit int, cType QueueEventType) ([]string, error) {
+func (q *Queue) Clean(grace int, limit int, cType types.QueueEventType) ([]string, error) {
 	var jobs []string
 
 	set := cType
