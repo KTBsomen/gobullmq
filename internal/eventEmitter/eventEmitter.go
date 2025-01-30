@@ -8,6 +8,8 @@ type EventEmitterIface interface {
 	RemoveAllListeners(event string)
 }
 
+var _ EventEmitterIface = (*EventEmitter)(nil)
+
 type EventEmitter struct {
 	eventChan map[string]chan []interface{}
 }

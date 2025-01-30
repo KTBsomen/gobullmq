@@ -29,6 +29,7 @@ type JobOptions struct {
 	Lifo             string `json:"lifo,omitempty" msgpack:"lifo,omitempty"`
 	JobId            string `json:"jobId,omitempty" msgpack:"jobId,omitempty"`
 	RepeatJobKey     string `json:"repeatJobKey,omitempty" msgpack:"repeatJobKey,omitempty"`
+	Token            string `json:"token,omitempty" msgpack:"token,omitempty"` // The token used for locking this job.
 
 	Repeat JobRepeatOptions `json:"repeat,omitempty" msgpack:"repeat,omitempty"`
 }
@@ -64,8 +65,13 @@ type Job struct {
 	Progress       int
 	Delay          int
 	DelayTimeStamp int64
-
-	AttemptsMade int
+	FinishedOn     time.Time
+	ProcessedOn    time.Time
+	RepeatJobKey   string
+	FailedReason   string
+	AttemptsMade   int
+	Returnvalue    interface{}
+	Token          string
 }
 
 func (job *Job) ToJsonData() error {

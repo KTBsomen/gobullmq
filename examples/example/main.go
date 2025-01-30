@@ -7,20 +7,37 @@ import (
 	"github.com/go-redis/redis/v8"
 	"go.codycody31.dev/gobullmq"
 	"go.codycody31.dev/gobullmq/types"
-	"time"
 )
 
 func main() {
 	var q *gobullmq.Queue
 	var queueName string
 	var qEvents *gobullmq.QueueEvents
+	var qWorker *gobullmq.Worker
+	var err error
+
+	qWorkerProcess := func(ctx context.Context, job *types.Job) (interface{}, error) {
+		fmt.Printf("Received job%s\n\tID: %s\n\tData: %s\n", job.Name, job.Id, job.Data)
+		return nil, nil
+	}
 
 	queueName = "test"
 	q, _ = gobullmq.NewQueue(context.Background(), queueName, gobullmq.QueueOption{
 		RedisIp:     "127.0.0.1:6379",
 		RedisPasswd: "",
 	})
-	qEvents, err := gobullmq.NewQueueEvents(context.Background(), queueName, gobullmq.QueueEventsOptions{
+	qWorker, err = gobullmq.NewWorker(context.Background(), queueName, gobullmq.WorkerOptions{
+		Concurrency:     1,
+		StalledInterval: 30000,
+	}, redis.NewClient(&redis.Options{
+		Addr:     "127.0.0.1:6379",
+		Password: "",
+	}), qWorkerProcess)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	qEvents, err = gobullmq.NewQueueEvents(context.Background(), queueName, gobullmq.QueueEventsOptions{
 		RedisClient: *redis.NewClient(&redis.Options{
 			Addr:     "127.0.0.1:6379",
 			Password: "",
@@ -76,7 +93,12 @@ func main() {
 		println(err.Error())
 	}
 
-	time.Sleep(5 * time.Second)
+	err = qWorker.Run()
+	if err != nil {
+		fmt.Printf("error running worker: %v\n", err)
+	}
+	qWorker.Wait()
 
+	qWorker.Close()
 	qEvents.Close()
 }

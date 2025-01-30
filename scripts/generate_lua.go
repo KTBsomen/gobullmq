@@ -92,7 +92,7 @@ type ScriptMetadata struct {
 type Cache map[string]ScriptMetadata
 
 func main() {
-	// Get rootpath, look for a go.mod file
+	// Get root path, look for a go.mod file
 	rootPath = findRootPath()
 
 	scripts := loadScripts(scriptDir)
@@ -235,9 +235,6 @@ func interpolate(fileInfo ScriptMetadata, processed []string) (string, []string)
 	return content, processed
 }
 
-// BUG: Content for includes is not being replaced or set correctly
-// Either that, or it's the interpolate, can't think of anything else
-// As the issue is that X root file, has Z includes, which have Y includes. However Y includes are not being replaced
 func resolveDependencies(fileInfo ScriptMetadata, cache Cache, isInclude bool, stack []string) (ScriptMetadata, Cache) {
 	for _, s := range stack {
 		if s == fileInfo.Path {
@@ -388,7 +385,7 @@ func resolvePath(scriptName string, stack []string) string {
 	// if first == '~' {
 	// 	sn = filepath.Join(rootPath, scriptName[2:])
 	// } else if first == '<' {
-	// 	sn = filpa
+	// 	sn = scriptName[1:]
 	// }
 	sn = filepath.Join(rootPath, scriptName[2:])
 

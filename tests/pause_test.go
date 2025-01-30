@@ -18,7 +18,7 @@ func TestPauseQueue(t *testing.T) {
 
 	beforeEach := func() {
 		queueName = "test-" + uuid.New().String()
-		q, _ = gobullmq.NewQueue(queueName, gobullmq.QueueOption{
+		q, _ = gobullmq.NewQueue(context.Background(), queueName, gobullmq.QueueOption{
 			RedisIp:     "127.0.0.1:6379",
 			RedisPasswd: "",
 		})

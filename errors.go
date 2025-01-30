@@ -2,6 +2,10 @@ package gobullmq
 
 import "fmt"
 
+var (
+	RateLimitError = "bullmq:rateLimitExceeded"
+)
+
 type StandardError struct {
 	OriginalError error
 	Message       string
