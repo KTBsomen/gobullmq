@@ -1,51 +1,89 @@
-/**
- * @Description: data struct and operations with queue
- * @FilePath: /bull-golang/queue.go
- * @Author: liyibing liyibing@lixiang.com
- * @Date: 2023-07-19 15:55:49
- */
-package bull
+package gobullmq
 
 import (
-	"github.com/hellosekai/bull-golang/internal/luaScripts"
-	"github.com/hellosekai/bull-golang/internal/redisAction"
-
+	"context"
+	"fmt"
 	"github.com/go-redis/redis/v8"
+	"github.com/vmihailenco/msgpack/v5"
+	"go.codycody31.dev/gobullmq/internal/utils"
+	"go.codycody31.dev/gobullmq/internal/utils/repeat"
+	"go.codycody31.dev/gobullmq/types"
+	"time"
+
+	eventemitter "go.codycody31.dev/gobullmq/internal/eventEmitter"
+	"go.codycody31.dev/gobullmq/internal/lua"
+	"go.codycody31.dev/gobullmq/internal/redisAction"
+
 	"github.com/google/uuid"
 )
 
-type BullQueueIface interface {
-	Add(jobData JobData, options ...withOption) (Job, error)
+type QueueIface interface {
+	eventemitter.EventEmitterIface
+	Init(ctx context.Context, name string, opts QueueOption) (*Queue, error)
+	Add(jobName string, jobData types.JobData, options ...types.QueueWithOption) (types.Job, error)
+	Pause() error
+	Resume() error
+	IsPaused() bool
+	Drain(delayed bool) error
+	Clean(grace int, limit int, cType types.QueueEventType) ([]string, error)
+	Obliterate(opts ObliterateOpts) error
 	Ping() error
+	Remove(jobId string, removeChildren bool) error
+	TrimEvents(max int64) (int64, error)
 }
 
-var _ BullQueueIface = (*BullQueue)(nil)
+var _ QueueIface = (*Queue)(nil)
 
-const (
-	SingleNode = 0
-	Cluster    = 1
-)
-
-type BullQueue struct {
+type Queue struct {
+	eventemitter.EventEmitter
 	Name      string
 	Token     uuid.UUID
 	KeyPrefix string
 	Client    redis.Cmdable
+	Prefix    string
+	ctx       context.Context
 }
 
-type BullQueueOption struct {
+type QueueOption struct {
 	Mode        int
 	KeyPrefix   string
-	QueueName   string
 	RedisIp     string
 	RedisPasswd string
+
+	// Options for the streams used internally in BullMQ.
+	Streams struct {
+		// Options for the events stream.
+		Events struct {
+			MaxLen int64 // Max approximated length for streams. Default is 10 000 events.
+		}
+	}
 }
 
-func NewBullQueue(opts BullQueueOption) (*BullQueue, error) {
-	q := &BullQueue{
-		Name:      opts.QueueName,
-		Token:     uuid.New(),
-		KeyPrefix: opts.KeyPrefix + ":" + opts.QueueName + ":",
+type QueueJob struct {
+	Name string
+	Data types.JobData
+	Opts types.JobOptions
+}
+
+func NewQueue(ctx context.Context, name string, opts QueueOption) (*Queue, error) {
+	q := &Queue{
+		Name:  name,
+		Token: uuid.New(),
+		ctx:   ctx,
+	}
+
+	q.EventEmitter.Init()
+
+	if opts.KeyPrefix == "" {
+		q.KeyPrefix = "bull"
+	} else {
+		q.KeyPrefix = opts.KeyPrefix
+	}
+	q.Prefix = q.KeyPrefix
+	q.KeyPrefix = q.KeyPrefix + ":" + name + ":"
+
+	if name == "" {
+		return nil, wrapError(nil, "Queue name must be provided'")
 	}
 
 	redisIp := opts.RedisIp
@@ -57,96 +95,407 @@ func NewBullQueue(opts BullQueueOption) (*BullQueue, error) {
 		return nil, wrapError(err, "bull Init error")
 	}
 
+	// TODO: Get the default values for the job options and store them in jobOpts
+
+	if opts.Streams.Events.MaxLen != 0 {
+		q.Client.XTrim(q.ctx, q.toKey("events"), opts.Streams.Events.MaxLen)
+	} else {
+		q.Client.HSet(q.ctx, q.toKey("meta"), "opts.maxLenEvents", "10000")
+	}
+
 	return q, nil
 }
 
-func (q *BullQueue) Init(opts BullQueueOption) error {
-	q.Name = opts.QueueName
-	q.Token = uuid.New()
-	q.KeyPrefix = opts.KeyPrefix + ":" + opts.QueueName + ":"
-
-	redisIp := opts.RedisIp
-	redisPasswd := opts.RedisPasswd
-	redisMode := opts.Mode
-	var err error
-	q.Client, err = redisAction.Init(redisIp, redisPasswd, redisMode)
+func (q *Queue) Init(ctx context.Context, name string, opts QueueOption) (*Queue, error) {
+	nq, err := NewQueue(ctx, name, opts)
 	if err != nil {
-		return wrapError(err, "bull Init error")
+		return nil, wrapError(err, "bull Init error")
 	}
-
-	return nil
+	return nq, nil
 }
 
-/**
- * @description:add a job into queue
- * @param {JobData} jobData
- * @param {...withOption} options
- * @return {*}
- */
-func (q *BullQueue) Add(jobData JobData, options ...withOption) (Job, error) {
-	distOption := &JobOptions{}
+// TODO: Test repeat job logic
+func (q *Queue) Add(jobName string, jobData types.JobData, options ...types.QueueWithOption) (types.Job, error) {
+	distOption := &types.JobOptions{}
+	var name string
 
 	for _, withOptionFunc := range options {
 		withOptionFunc(distOption)
 	}
 
-	name := _DEFAULT_JOB_NAME
+	if distOption.JobId != "" {
+		if distOption.JobId == "0" || (distOption.JobId[0] == '0' && distOption.JobId[1] != ':') {
+			return types.Job{}, wrapError(nil, "JobId cannot be '0' or start with 0:")
+		}
+	}
+
+	// TODO: setup this.jobsOpts for the default base options configured
+
+	if jobName == "" {
+		name = _DEFAULT_JOB_NAME
+	} else {
+		name = jobName
+	}
+
+	if distOption.Repeat.Every != 0 || distOption.Repeat.Pattern != "" {
+		return q.addRepeatableJob(name, jobData, *distOption, true)
+	}
+
 	job, err := newJob(name, jobData, *distOption)
 	if err != nil {
-		return job, wrapError(err, "bull Add error")
+		return job, wrapError(err, "attempt to create new job failed")
 	}
-	err = q.addJob(job)
+	jobId, err := q.addJob(job, distOption.JobId)
 	if err != nil {
-		return job, wrapError(err, "bull Add error")
+		return job, wrapError(err, "failed to add job")
 	}
+	job.Id = jobId
+
+	q.Emit("waiting", job)
 
 	return job, nil
 }
 
-func (q *BullQueue) addJob(job Job) error {
-	rdb := q.Client
-	keys := q.getKeys()
-	args := q.getArgs(job)
-	err := redisAction.ExecLua(luaScripts.AddJobLua, rdb, keys, args)
+func (q *Queue) pause(pause bool) error {
+	client := q.Client
+	p := "paused"
+
+	// Determine the source and destination queues based on whether to pause or resume
+	src := "wait"
+	dst := "paused"
+	if !pause {
+		src = "paused"
+		dst = "wait"
+		p = "resumed"
+	}
+
+	// Check if the source queue exists
+	exists, err := client.Exists(context.Background(), q.toKey(src)).Result()
 	if err != nil {
-		return err
+		return wrapError(err, "failed to check if queue exists")
+	}
+
+	if exists == 0 {
+		// If the queue doesn't exist, there's no need to rename it
+		return wrapError(nil, "source queue does not exist, nothing to pause or resume")
+	}
+
+	// Define the keys to operate on
+	keys := []string{
+		q.toKey(src),
+		q.toKey(dst),
+		q.toKey("meta"),
+		q.toKey("prioritized"),
+		q.toKey("events"),
+	}
+
+	rs, err := lua.Pause(client, keys, p)
+	if err != nil {
+		return wrapError(err, "failed to pause or resume queue")
+	}
+	fmt.Println("Result: ", rs)
+
+	return nil
+}
+
+func (q *Queue) Pause() error {
+	err := q.pause(true)
+	if err != nil {
+		return wrapError(err, "failed to pause queue")
+	}
+	q.Emit("paused")
+	return nil
+}
+
+func (q *Queue) Resume() error {
+	err := q.pause(false)
+	if err != nil {
+		return wrapError(err, "failed to resume queue")
+	}
+	q.Emit("resumed")
+	return nil
+}
+
+func (q *Queue) IsPaused() bool {
+	client := q.Client
+	pausedKeyExists, _ := client.HExists(context.Background(), q.KeyPrefix+"meta", "paused").Result()
+	return pausedKeyExists
+}
+
+func (q *Queue) addJob(job types.Job, jobId string) (string, error) {
+	rdb := q.Client
+
+	keys := make([]string, 0, 8)
+	keys = append(keys, q.KeyPrefix+"wait")
+	keys = append(keys, q.KeyPrefix+"paused")
+	keys = append(keys, q.KeyPrefix+"meta")
+	keys = append(keys, q.KeyPrefix+"id")
+	keys = append(keys, q.KeyPrefix+"delayed")
+	keys = append(keys, q.KeyPrefix+"prioritized")
+	keys = append(keys, q.KeyPrefix+"completed")
+	keys = append(keys, q.KeyPrefix+"events")
+	keys = append(keys, q.KeyPrefix+"pc")
+
+	args := make([]interface{}, 0)
+	args = append(args, q.KeyPrefix)
+	args = append(args, jobId)
+	args = append(args, job.Name)
+	args = append(args, job.TimeStamp)
+	for i := 0; i < 4; i++ {
+		args = append(args, nil)
+	}
+	args = append(args, job.Opts.RepeatJobKey)
+
+	msgPackedArgs, err := msgpack.Marshal(args)
+	if err != nil {
+		return "nil", fmt.Errorf("failed to marshal args: %v", err)
+	}
+
+	msgPackedOpts, err := msgpack.Marshal(job.Opts)
+	if err != nil {
+		return "nil", fmt.Errorf("failed to marshal opts: %v", err)
+	}
+
+	givenJobId, err := lua.AddJob(rdb, keys, msgPackedArgs, job.Data, msgPackedOpts)
+	if err != nil {
+		return "nil", fmt.Errorf("failed to add job: %v", err)
+	}
+
+	jobIdStr := givenJobId.(string)
+
+	return jobIdStr, nil
+}
+
+func (q *Queue) addRepeatableJob(name string, jobData types.JobData, opts types.JobOptions, skipCheckExists bool) (types.Job, error) {
+	prevMillis := opts.Repeat.PrevMillis
+	currentCount := opts.Repeat.Count
+
+	if currentCount == 0 {
+		currentCount = 1
+	} else {
+		currentCount++
+	}
+
+	if limit := opts.Repeat.Limit; limit > 0 && currentCount > limit {
+		return types.Job{}, wrapError(nil, "repeatable job limit exceeded")
+	}
+
+	now := time.Now().UnixNano() / int64(time.Millisecond)
+
+	if opts.Repeat.EndDate != nil && now > opts.Repeat.EndDate.UnixNano()/int64(time.Millisecond) {
+		return types.Job{}, wrapError(nil, "repeatable job end date exceeded")
+	}
+
+	if int64(prevMillis) > now {
+		now = int64(prevMillis)
+	}
+
+	nextMillis, err := repeat.Strategy(now, opts)
+	if err != nil {
+		return types.Job{}, wrapError(err, "failed to calculate nextMillis")
+	}
+
+	pattern := opts.Repeat.Pattern
+	hasImmediately := false
+
+	if (opts.Repeat.Every != 0 || pattern != "") && opts.Repeat.Immediately {
+		hasImmediately = true
+	}
+
+	var offset int64
+	if hasImmediately {
+		offset = now - nextMillis
+	} else {
+		offset = 0
+	}
+
+	if nextMillis > 0 {
+		//if (!prevMillis && opts.jobId) {
+		//	repeatOpts.jobId = opts.jobId;
+		//}
+		if prevMillis != 0 && opts.JobId != "" {
+			opts.Repeat.JobId = opts.JobId
+		}
+
+		repeatJobKey := repeat.GetKey(name, opts.Repeat)
+
+		repeatableExists := true
+
+		if !skipCheckExists {
+			f, err := q.Client.ZScore(q.ctx, q.toKey("repeat"), repeatJobKey).Result()
+			if err != nil {
+				repeatableExists = false
+			}
+
+			if f == 0 {
+				repeatableExists = false
+			}
+		}
+
+		if repeatableExists {
+			jobId, err := repeat.GetJobId(name, nextMillis, utils.MD5Hash(repeatJobKey), opts.JobId)
+			if err != nil {
+				return types.Job{}, wrapError(err, "failed to get repeatable job id")
+			}
+
+			now := time.Now().UnixNano() / int64(time.Millisecond)
+			delay := nextMillis + offset - now
+
+			opts.JobId = jobId
+			opts.Delay = int(delay) // delay < 0 || hasImmediately ? 0 : delay
+			opts.TimeStamp = now
+			opts.Repeat.PrevMillis = int(nextMillis)
+			opts.RepeatJobKey = repeatJobKey
+			opts.Repeat.Count = currentCount
+
+			// TODO: Convert opts.Repeat from pointer to value
+
+			q.Client.ZAdd(q.ctx, q.toKey("repeat"), &redis.Z{
+				Score:  float64(nextMillis),
+				Member: repeatJobKey,
+			})
+
+			job, err := newJob(name, jobData, opts)
+			if err != nil {
+				return job, wrapError(err, "attempt to create new job failed")
+			}
+			_, err = q.addJob(job, jobId)
+			if err != nil {
+				return job, wrapError(err, "failed to add repeatable job")
+			}
+
+			q.Emit("waiting", job)
+
+			return job, nil
+		} else {
+			return types.Job{}, wrapError(nil, "repeatable job does not exist")
+		}
+	} else {
+		return types.Job{}, wrapError(nil, "repeatable job nextMillis is invalid")
+	}
+}
+
+func (q *Queue) Drain(delayed bool) error {
+	keys := []string{
+		q.toKey("wait"),
+		q.toKey("paused"),
+	}
+
+	if delayed {
+		keys = append(keys, q.toKey("delayed"))
+	} else {
+		keys = append(keys, "")
+	}
+	keys = append(keys, q.toKey("prioritized"))
+
+	_, err := lua.Drain(q.Client, keys, q.KeyPrefix)
+	if err != nil {
+		return wrapError(err, "failed to drain queue")
 	}
 	return nil
 }
 
-func (q *BullQueue) getKeys() []string {
-	keys := make([]string, 0, 6)
-	keys = append(keys, q.KeyPrefix+"wait")
-	keys = append(keys, q.KeyPrefix+"paused")
-	keys = append(keys, q.KeyPrefix+"meta-paused")
-	keys = append(keys, q.KeyPrefix+"id")
-	keys = append(keys, q.KeyPrefix+"delayed")
-	keys = append(keys, q.KeyPrefix+"priority")
+// Clean cleans jobs from the queue (limit is the max number of jobs to clean, 0 is unlimited)
+func (q *Queue) Clean(grace int, limit int, cType types.QueueEventType) ([]string, error) {
+	var jobs []string
 
-	return keys
-}
+	set := cType
+	timestamp := time.Now().Unix() - int64(grace)
 
-func (q *BullQueue) getArgs(job Job) []interface{} {
-	args := make([]interface{}, 0, 11)
-	args = append(args, q.KeyPrefix)
-	args = append(args, job.Id)
-	args = append(args, job.Name)
-	args = append(args, job.Data)
-	args = append(args, job.OptsByJson)
-	args = append(args, job.TimeStamp)
-	args = append(args, job.Delay)
-	args = append(args, job.DelayTimeStamp)
-	args = append(args, job.Opts.Priority)
-	if job.Opts.Lifo == "RPUSH" {
-		args = append(args, "RPUSH")
-	} else {
-		args = append(args, "LPUSH")
+	keys := []string{
+		q.toKey(string(set)),
+		q.toKey("events"),
 	}
-	args = append(args, q.Token)
 
-	return args
+	i, err := lua.CleanJobsInSet(q.Client, keys, q.KeyPrefix, timestamp, limit, string(set))
+	if err != nil {
+		return jobs, wrapError(err, "failed to clean jobs")
+	}
+
+	jobs = i.([]string)
+
+	q.Emit("cleaned", jobs, string(set))
+	return jobs, nil
 }
 
-func (q *BullQueue) Ping() error {
+type ObliterateOpts struct {
+	Force bool // Use force = true to force obliteration even with active jobs in the queue (default: false)
+	Count int  // Use count with the maximum number of deleted keys per iteration (default: 1000)
+}
+
+func (q *Queue) Obliterate(opts ObliterateOpts) error {
+	err := q.pause(true)
+	if err != nil {
+		return wrapError(err, "failed to pause queue")
+	}
+
+	var force string
+	if opts.Force {
+		force = "force"
+	}
+
+	count := opts.Count
+	if count == 0 {
+		count = 1000
+	}
+
+	keys := []string{
+		q.toKey("meta"),
+		q.KeyPrefix,
+	}
+
+	for {
+		i, err := lua.Obliterate(q.Client, keys, count, force)
+		if err != nil {
+			return wrapError(err, "failed to obliterate queue")
+		}
+
+		// -1: Queue is not paused
+		// -2: Queue has active jobs
+		// 0: Queue obliterated completely
+		// 1: Queue obliterated partially
+		result := i.(int64)
+
+		if result < 0 {
+			switch result {
+			case -1:
+				return wrapError(nil, "cannot obliterate non-paused queue")
+			case -2:
+				return wrapError(nil, "cannot obliterate queue with active jobs")
+			}
+		} else if result == 0 {
+			break
+		}
+	}
+
+	return nil
+}
+
+func (q *Queue) Ping() error {
 	return redisAction.Ping(q.Client)
+}
+
+func (q *Queue) toKey(name string) string {
+	return q.KeyPrefix + name
+}
+
+func (q *Queue) Remove(jobId string, removeChildren bool) error {
+	keys := []string{
+		q.KeyPrefix,
+	}
+
+	i, err := lua.RemoveJob(q.Client, keys, jobId, removeChildren)
+	if err != nil {
+		return wrapError(err, fmt.Sprintf("failed to remove job: %s", jobId))
+	}
+
+	if i.(int64) == 0 {
+		return wrapError(err, fmt.Sprintf("failed to remove job: %s, the job is locked", jobId))
+	}
+
+	return nil
+}
+
+func (q *Queue) TrimEvents(max int64) (int64, error) {
+	return q.Client.XTrim(q.ctx, q.KeyPrefix+"events", max).Result()
 }

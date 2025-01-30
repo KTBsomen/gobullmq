@@ -1,20 +1,9 @@
-/**
- * @Description:
- * @FilePath: /bull-golang/common.go
- * @Author: liyibing liyibing@lixiang.com
- * @Date: 2023-07-28 10:25:57
- */
-package bull
+package gobullmq
 
-type withOption func(o *JobOptions)
+import "go.codycody31.dev/gobullmq/types"
 
-/**
- * @description: set priority, 0 is highest and default value
- * @param {int} priority
- * @return {*}
- */
-func WithPriorityOp(priority int) withOption {
-	return func(o *JobOptions) {
+func QueueWithPriorityOp(priority int) types.QueueWithOption {
+	return func(o *types.JobOptions) {
 		if o == nil {
 			return
 		}
@@ -22,13 +11,8 @@ func WithPriorityOp(priority int) withOption {
 	}
 }
 
-/**
- * @description: false is default
- * @param {bool} flag
- * @return {*}
- */
-func WithRemoveOnCompleteOp(flag bool) withOption {
-	return func(o *JobOptions) {
+func QueueWithRemoveOnCompleteOp(flag bool) types.QueueWithOption {
+	return func(o *types.JobOptions) {
 		if o == nil {
 			return
 		}
@@ -36,13 +20,8 @@ func WithRemoveOnCompleteOp(flag bool) withOption {
 	}
 }
 
-/**
- * @description: false is default
- * @param {bool} flag
- * @return {*}
- */
-func WithRemoveOnFailOp(flag bool) withOption {
-	return func(o *JobOptions) {
+func QueueWithRemoveOnFailOp(flag bool) types.QueueWithOption {
+	return func(o *types.JobOptions) {
 		if o == nil {
 			return
 		}
@@ -50,13 +29,8 @@ func WithRemoveOnFailOp(flag bool) withOption {
 	}
 }
 
-/**
- * @description: set attemp times and 1 is default
- * @param {int} times
- * @return {*}
- */
-func WithAttemptsOp(times int) withOption {
-	return func(o *JobOptions) {
+func QueueWithAttemptsOp(times int) types.QueueWithOption {
+	return func(o *types.JobOptions) {
 		if o == nil {
 			return
 		}
@@ -64,13 +38,8 @@ func WithAttemptsOp(times int) withOption {
 	}
 }
 
-/**
- * @description: set delay time and 0 is default
- * @param {int} delayTime
- * @return {*}
- */
-func WithDelayOp(delayTime int) withOption {
-	return func(o *JobOptions) {
+func QueueWithDelayOp(delayTime int) types.QueueWithOption {
+	return func(o *types.JobOptions) {
 		if o == nil {
 			return
 		}
@@ -78,16 +47,30 @@ func WithDelayOp(delayTime int) withOption {
 	}
 }
 
-/**
- * @description:
- * @param {int64} timeStamp by time.Now().UnixMilli()
- * @return {*}
- */
-func WithTimeStamp(timeStamp int64) withOption {
-	return func(o *JobOptions) {
+// WithTimeStamp timeStamp by time.Now().UnixMilli()
+func QueueWithTimeStamp(timeStamp int64) types.QueueWithOption {
+	return func(o *types.JobOptions) {
 		if o == nil {
 			return
 		}
 		o.TimeStamp = timeStamp
+	}
+}
+
+func QueueWithJobId(id string) types.QueueWithOption {
+	return func(o *types.JobOptions) {
+		if o == nil {
+			return
+		}
+		o.JobId = id
+	}
+}
+
+func QueueWithRepeat(repeat types.JobRepeatOptions) types.QueueWithOption {
+	return func(o *types.JobOptions) {
+		if o == nil {
+			return
+		}
+		o.Repeat = repeat
 	}
 }

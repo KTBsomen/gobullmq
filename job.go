@@ -1,13 +1,11 @@
-/**
- * @Description: data struct and operations with job
- * @FilePath: /bull-golang/job.go
- * @Author: liyibing liyibing@lixiang.com
- * @Date: 2023-07-19 15:59:43
- */
-package bull
+package gobullmq
 
 import (
+	"context"
 	"encoding/json"
+	"github.com/go-redis/redis/v8"
+	"go.codycody31.dev/gobullmq/types"
+	"strconv"
 	"time"
 )
 
@@ -15,54 +13,202 @@ const (
 	_DEFAULT_JOB_NAME = "__default__"
 )
 
-// 这边应该要求传入json数据，需要在使用接口直接保证
-type JobData interface{}
-
-// 这个结构也是需要被序列化的
-type JobOptions struct {
-	Priority         int    `json:"priority"`
-	RemoveOnComplete bool   `json:"removeOnComplete"`
-	RemoveOnFail     bool   `json:"removeOnFail"`
-	Attempts         int    `json:"attempts"`
-	Delay            int    `json:"delay"`
-	TimeStamp        int64  `json:"timestamp"`
-	Lifo             string `json:"lifo"`
-}
-
-type Job struct {
-	Name           string
-	Id             string
-	Data           JobData
-	Opts           JobOptions
-	OptsByJson     []byte
-	TimeStamp      int64
-	Progress       int
-	Delay          int
-	DelayTimeStamp int64
-
-	AttemptsMade int
-}
-
-/**
- * @description:
- * @return {*}
- */
-func (job *Job) toJsonData() error {
-	data, err := json.Marshal(job.Opts)
+func JobFromId(ctx context.Context, client redis.Cmdable, queueKey string, jobId string) (types.Job, error) {
+	jobData, err := client.HGetAll(ctx, queueKey+jobId).Result()
 	if err != nil {
-		return err
+		return types.Job{}, err
 	}
-	job.OptsByJson = data
-	return err
+
+	if len(jobData) == 0 {
+		return types.Job{}, nil
+	}
+
+	//	return isEmpty(jobData)
+	//	? undefined
+	//	: this.fromJSON<T, R, N>(
+	//		queue,
+	//		(<unknown>jobData) as JobJsonRaw,
+	//		jobId,
+	//);
+
+	job, err := JobFromJson(jobData)
+	if err != nil {
+		return types.Job{}, err
+	}
+
+	return job, nil
 }
 
-func newJob(name string, data JobData, opts JobOptions) (Job, error) {
+func JobFromJson(jobData map[string]string) (types.Job, error) {
+	data := jobData["data"]
+	opts, err := JobOptsFromJson(jobData["opts"])
+	if err != nil {
+		return types.Job{}, err
+	}
+
+	job := types.Job{
+		Name: jobData["name"],
+		Data: data,
+		Opts: opts,
+		Id:   jobData["id"],
+	}
+
+	// Parse int64 timestamp
+	if timestampStr, ok := jobData["timestamp"]; ok {
+		if timestamp, err := strconv.ParseInt(timestampStr, 10, 64); err == nil {
+			job.TimeStamp = timestamp
+		}
+	}
+
+	// Parse progress
+	if progressStr, ok := jobData["progress"]; ok {
+		if progress, err := strconv.Atoi(progressStr); err == nil {
+			job.Progress = progress
+		}
+	}
+
+	// Parse delay
+	if delayStr, ok := jobData["delay"]; ok {
+		if delay, err := strconv.Atoi(delayStr); err == nil {
+			job.Delay = delay
+		}
+	}
+
+	// Parse finishedOn
+	if finishedOnStr, ok := jobData["finishedOn"]; ok {
+		if finishedOn, err := strconv.ParseInt(finishedOnStr, 10, 64); err == nil {
+			job.FinishedOn = time.Unix(finishedOn, 0)
+		}
+	}
+
+	// Parse processedOn
+	if processedOnStr, ok := jobData["processedOn"]; ok {
+		if processedOn, err := strconv.ParseInt(processedOnStr, 10, 64); err == nil {
+			job.ProcessedOn = time.Unix(processedOn, 0)
+		}
+	}
+
+	if repeatJobKey, ok := jobData["rjk"]; ok {
+		job.RepeatJobKey = repeatJobKey
+	}
+
+	if failedReason, ok := jobData["failedReason"]; ok {
+		job.FailedReason = failedReason
+	}
+
+	if attemptsMadeStr, ok := jobData["attemptsMade"]; ok {
+		if attemptsMade, err := strconv.Atoi(attemptsMadeStr); err == nil {
+			job.AttemptsMade = attemptsMade
+		}
+	}
+
+	if returnvalue, ok := jobData["returnvalue"]; ok {
+		var returnVal interface{}
+		if err := json.Unmarshal([]byte(returnvalue), &returnVal); err == nil {
+			job.Returnvalue = returnVal
+		}
+	}
+
+	//// Parse parentKey
+	//if parentKey, ok := jobData["parentKey"]; ok {
+	//	job.ParentKey = parentKey
+	//}
+
+	//// Parse parent (as a JSON object)
+	//if parent, ok := jobData["parent"]; ok {
+	//	var parentData map[string]interface{}
+	//	if err := json.Unmarshal([]byte(parent), &parentData); err == nil {
+	//		job.Parent = parentData
+	//	}
+	//}
+
+	return job, nil
+}
+
+// jobOptsDecodeMap maps JSON keys to struct field names.
+var jobOptsDecodeMap = map[string]string{
+	"priority":         "Priority",
+	"removeOnComplete": "RemoveOnComplete",
+	"removeOnFail":     "RemoveOnFail",
+	"attempts":         "Attempts",
+	"delay":            "Delay",
+	"timestamp":        "TimeStamp",
+	"lifo":             "Lifo",
+	"jobId":            "JobId",
+	"repeatJobKey":     "RepeatJobKey",
+	"token":            "Token",
+	"currentDate":      "CurrentDate",
+	"startDate":        "StartDate",
+	"endDate":          "EndDate",
+	"utc":              "UTC",
+	"tz":               "TZ",
+	"nthDayOfWeek":     "NthDayOfWeek",
+	"pattern":          "Pattern",
+	"limit":            "Limit",
+	"every":            "Every",
+	"immediately":      "Immediately",
+	"count":            "Count",
+}
+
+func JobOptsFromJson(rawOpts string) (types.JobOptions, error) {
+	var opts types.JobOptions
+	err := json.Unmarshal([]byte(rawOpts), &opts)
+	return opts, err
+
+	//var opts map[string]interface{}
+	//var jobOpts types.JobOptions
+	//
+	//if err := json.Unmarshal([]byte(rawOpts), &opts); err != nil {
+	//	return jobOpts, err
+	//}
+	//
+	//for key, value := range opts {
+	//	if field, ok := jobOptsDecodeMap[key]; ok {
+	//		switch field {
+	//		case "Priority":
+	//			jobOpts.Priority = int(value.(float64))
+	//		case "RemoveOnComplete":
+	//			jobOpts.RemoveOnComplete = value.(bool)
+	//		case "RemoveOnFail":
+	//			jobOpts.RemoveOnFail = value.(bool)
+	//		case "Attempts":
+	//			jobOpts.Attempts = int(value.(float64))
+	//		case "Delay":
+	//			jobOpts.Delay = int(value.(float64))
+	//		case "TimeStamp":
+	//			jobOpts.TimeStamp = int64(value.(float64))
+	//		case "Lifo":
+	//			jobOpts.Lifo = value.(string)
+	//		case "JobId":
+	//			jobOpts.JobId = value.(string)
+	//		case "RepeatJobKey":
+	//			jobOpts.RepeatJobKey = value.(string)
+	//		case "Token":
+	//			jobOpts.Token = value.(string)
+	//			// Additional cases for other fields as needed
+	//		}
+	//		// TODO: Repeat - JobRepeatOptions
+	//	}
+	//}
+	//
+	//return jobOpts, nil
+}
+
+func JobMoveToFailed(ctx context.Context, client redis.Cmdable, queueKey string, err error, token string) error {
+	return nil
+}
+
+func JobMoveToCompleted(ctx context.Context, client redis.Cmdable, queueKey string, result interface{}, token string) error {
+	return nil
+}
+
+func newJob(name string, data types.JobData, opts types.JobOptions) (types.Job, error) {
 	op := setOpts(opts)
 	if name == "" {
 		name = _DEFAULT_JOB_NAME
 	}
 
-	curJob := Job{
+	curJob := types.Job{
 		Opts:         op,
 		Name:         name,
 		Data:         data,
@@ -72,7 +218,7 @@ func newJob(name string, data JobData, opts JobOptions) (Job, error) {
 		AttemptsMade: 0,
 	}
 
-	err := curJob.toJsonData()
+	err := curJob.ToJsonData()
 	if err != nil {
 		return curJob, err
 	}
@@ -80,7 +226,7 @@ func newJob(name string, data JobData, opts JobOptions) (Job, error) {
 	return curJob, nil
 }
 
-func setOpts(opts JobOptions) JobOptions {
+func setOpts(opts types.JobOptions) types.JobOptions {
 	op := opts
 
 	if opts.Delay < 0 {
