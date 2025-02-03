@@ -4,17 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"testing"
+	"time"
+
 	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
 	"go.codycody31.dev/gobullmq"
 	"go.codycody31.dev/gobullmq/internal/testutils"
-	"testing"
-	"time"
 )
 
 func TestQueueEvents_WaitingEvent(t *testing.T) {
 	queueName := "test-" + uuid.New().String()
-	q, err := gobullmq.NewQueue(queueName, gobullmq.QueueOption{
+	q, err := gobullmq.NewQueue(context.Background(), queueName, gobullmq.QueueOption{
 		RedisIp:     "127.0.0.1:6379",
 		RedisPasswd: "",
 	})
