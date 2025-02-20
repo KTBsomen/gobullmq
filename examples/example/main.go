@@ -4,40 +4,47 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
 	"github.com/go-redis/redis/v8"
 	"go.codycody31.dev/gobullmq"
 	"go.codycody31.dev/gobullmq/types"
 )
 
 func main() {
-	var q *gobullmq.Queue
-	var queueName string
-	var qEvents *gobullmq.QueueEvents
-	var qWorker *gobullmq.Worker
-	var err error
+	queueName := "test"
+	ctx := context.Background()
 
-	qWorkerProcess := func(ctx context.Context, job *types.Job) (interface{}, error) {
-		fmt.Printf("Received job%s\n\tID: %s\n\tData: %s\n", job.Name, job.Id, job.Data)
-		return nil, nil
-	}
-
-	queueName = "test"
-	q, _ = gobullmq.NewQueue(context.Background(), queueName, gobullmq.QueueOption{
+	// Initialize the queue
+	queue, err := gobullmq.NewQueue(ctx, queueName, gobullmq.QueueOption{
 		RedisIp:     "127.0.0.1:6379",
 		RedisPasswd: "",
 	})
-	qWorker, err = gobullmq.NewWorker(context.Background(), queueName, gobullmq.WorkerOptions{
+	if err != nil {
+		fmt.Println("Error initializing queue:", err)
+		return
+	}
+
+	// Define the worker process function
+	workerProcess := func(ctx context.Context, job *types.Job) (interface{}, error) {
+		fmt.Printf("Processing job: %s\n", job.Id)
+		return nil, nil
+	}
+
+	// Initialize the worker
+	worker, err := gobullmq.NewWorker(ctx, queueName, gobullmq.WorkerOptions{
 		Concurrency:     1,
 		StalledInterval: 30000,
 	}, redis.NewClient(&redis.Options{
 		Addr:     "127.0.0.1:6379",
 		Password: "",
-	}), qWorkerProcess)
+	}), workerProcess)
 	if err != nil {
-		fmt.Println(err)
+		fmt.Println("Error initializing worker:", err)
 		return
 	}
-	qEvents, err = gobullmq.NewQueueEvents(context.Background(), queueName, gobullmq.QueueEventsOptions{
+
+	// Initialize queue events
+	events, err := gobullmq.NewQueueEvents(ctx, queueName, gobullmq.QueueEventsOptions{
 		RedisClient: *redis.NewClient(&redis.Options{
 			Addr:     "127.0.0.1:6379",
 			Password: "",
@@ -46,59 +53,63 @@ func main() {
 		Autorun: true,
 	})
 	if err != nil {
-		fmt.Println(err)
+		fmt.Println("Error initializing queue events:", err)
 		return
 	}
 
-	qEvents.On("added", func(args ...interface{}) {
-		fmt.Println("Added event")
-		fmt.Println(args)
+	// Set up event listeners
+	events.On("completed", func(args ...interface{}) {
+		fmt.Println("Job completed:", args)
+	})
+	events.On("active", func(args ...interface{}) {
+		fmt.Println("Job active:", args)
+	})
+	events.On("added", func(args ...interface{}) {
+		fmt.Println("Job added:", args)
+	})
+	events.On("error", func(args ...interface{}) {
+		fmt.Println("Error event:", args)
 	})
 
-	qEvents.On("error", func(args ...interface{}) {
-		fmt.Println("Error event")
-		fmt.Println(args)
+	// Create job data
+	jobData, err := json.Marshal(struct {
+		Foo string `json:"foo"`
+	}{
+		Foo: "bar",
 	})
-
-	jobdata, err := json.Marshal(
-		struct {
-			Foo string `json:"foo"`
-		}{
-			Foo: "bar",
-		})
 	if err != nil {
-		fmt.Println(err)
+		fmt.Println("Error marshaling job data:", err)
 		return
 	}
 
-	_, err = q.Add("test", jobdata)
-	if err != nil {
-		println(err.Error())
+	// Add jobs to the queue
+	for i := 0; i < 10; i++ {
+		if _, err := queue.Add("test", jobData); err != nil {
+			fmt.Println("Error adding job:", err)
+		}
 	}
 
-	//err = q.Remove(j.Id, true)
-	//if err != nil {
-	//	println(err.Error())
-	//}
+	// if _, err := queue.Add("test", jobData, gobullmq.JobOptionWithRepeat(types.JobRepeatOptions{
+	// 	Every: 1000,
+	// })); err != nil {
+	// 	fmt.Println("Error adding repeatable job:", err)
+	// }
 
-	_, err = q.Add("test", jobdata)
-	if err != nil {
-		println(err.Error())
+	worker.On("completed", func(args ...interface{}) {
+		fmt.Println("Job completed:", args)
+	})
+	worker.On("error", func(args ...interface{}) {
+		fmt.Println("Worker error:", args)
+	})
+
+	// Run the worker
+	if err := worker.Run(); err != nil {
+		fmt.Println("Error running worker:", err)
 	}
 
-	_, err = q.Add("test", jobdata, gobullmq.QueueWithRepeat(types.JobRepeatOptions{
-		Every: 1000,
-	}))
-	if err != nil {
-		println(err.Error())
-	}
+	worker.Wait()
 
-	err = qWorker.Run()
-	if err != nil {
-		fmt.Printf("error running worker: %v\n", err)
-	}
-	qWorker.Wait()
-
-	qWorker.Close()
-	qEvents.Close()
+	// Clean up
+	worker.Close()
+	events.Close()
 }

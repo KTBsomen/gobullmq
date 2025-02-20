@@ -3,10 +3,11 @@ package gobullmq
 import (
 	"context"
 	"encoding/json"
-	"github.com/go-redis/redis/v8"
-	"go.codycody31.dev/gobullmq/types"
 	"strconv"
 	"time"
+
+	"github.com/go-redis/redis/v8"
+	"go.codycody31.dev/gobullmq/types"
 )
 
 const (
@@ -194,11 +195,9 @@ func JobOptsFromJson(rawOpts string) (types.JobOptions, error) {
 	//return jobOpts, nil
 }
 
-func JobMoveToFailed(ctx context.Context, client redis.Cmdable, queueKey string, err error, token string) error {
-	return nil
-}
+// TODO: Complete these two key bits of logic, or else we can never finish processing anythings
 
-func JobMoveToCompleted(ctx context.Context, client redis.Cmdable, queueKey string, result interface{}, token string) error {
+func JobMoveToFailed(ctx context.Context, client redis.Cmdable, queueKey string, job *types.Job, err error, token string) error {
 	return nil
 }
 

@@ -3,8 +3,14 @@ package gobullmq
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
+	"sync"
+	"time"
+
 	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
 	"github.com/vmihailenco/msgpack/v5"
@@ -13,11 +19,6 @@ import (
 	"go.codycody31.dev/gobullmq/internal/lua"
 	"go.codycody31.dev/gobullmq/internal/utils"
 	"go.codycody31.dev/gobullmq/types"
-	"log"
-	"math"
-	"strconv"
-	"sync"
-	"time"
 )
 
 //type WorkerIface interface {
@@ -192,22 +193,6 @@ func (w *Worker) Once(event string, listener func(...interface{})) {
 	w.ee.Once(event, listener)
 }
 
-func (w *Worker) getStalledJobs() ([]string, error) {
-	// Simulate retrieving stalled jobs. Replace with actual Redis query logic.
-	// Here, we're returning a hardcoded list for demonstration purposes.
-	return []string{"job1", "job2"}, nil
-}
-
-func (w *Worker) extendLocksForJobs(jobs []*types.Job) error {
-	for _, job := range jobs {
-		log.Printf("Extending lock for job: %s", job.Id)
-		// Extend lock logic here
-	}
-	return nil
-}
-
-// TODO: callProcessJob
-
 func (w *Worker) createJob(jobData map[string]interface{}, jobId string) types.Job {
 	// Convert jobData to map[string]string
 	convertedData, err := utils.ConvertToMapString(jobData)
@@ -267,42 +252,56 @@ func (w *Worker) Run() error {
 			//!this.waiting &&
 			//	asyncFifoQueue.numTotal() < this.opts.concurrency &&
 			//	(!this.limitUntil || asyncFifoQueue.numTotal() == 0)
-			if fifoQueue.NumTotal() < w.opts.Concurrency && fifoQueue.NumTotal() == 0 {
+			if !w.paused && fifoQueue.NumTotal() < w.opts.Concurrency {
 				tokenPostfix++
 				token := fmt.Sprintf("%s:%d", w.Token, tokenPostfix)
 
-				fifoQueue.Add(func() (types.Job, error) {
-					return w.retryIfFailed(func() (*types.Job, error) {
+				if err := fifoQueue.Add(func() (types.Job, error) {
+					j, err := w.retryIfFailed(func() (*types.Job, error) {
 						// Fetch the next job
-						nextJob, err := w.getNextJob(token, GetNextJobOptions{})
+						nextJob, err := w.getNextJob(token, GetNextJobOptions{Block: true})
 						if err != nil {
 							return nil, err
 						}
 
 						if nextJob == nil {
-							return nil, errors.New("no job available")
+							// Sleep briefly to avoid tight loop when no jobs are available
+							time.Sleep(time.Second)
+							return nil, nil
 						}
 
 						return nextJob, nil
 					}, w.opts.RunRetryDelay)
-				})
+					if err != nil {
+						return types.Job{}, err
+					}
+
+					return j, nil
+				}); err != nil {
+					w.Emit("error", fmt.Sprintf("Error adding job to queue: %v", err))
+					continue
+				}
 			}
 
-			job, err := fifoQueue.Fetch()
+			job, err := fifoQueue.Fetch(w.ctx)
 			if err != nil {
-				w.Emit("error", fmt.Sprintf("Critical error in fetch: %v", err))
+				if err != context.Canceled && !errors.Is(err, fifoqueue.ErrQueueClosed) && !errors.Is(err, errors.New("no job available")) {
+					w.Emit("error", fmt.Sprintf("Critical error in fetch: %v", err))
+				}
+				continue
 			}
 
-			if job != nil {
-				token := job.Opts.Token
-				// TODO: Seems that the processJob function is actually being called concurrently, even when set to 1
-				fifoQueue.Add(func() (types.Job, error) {
+			if job != nil && job.Id != "" && job.Id != "0" {
+				token := job.Token
+				if err := fifoQueue.Add(func() (types.Job, error) {
 					// Define the function to process the job
 					processJobFunc := func() (*types.Job, error) {
 						processJob, err := w.processJob(
 							*job,
 							token,
-							fifoQueue.NumTotal,
+							func() bool {
+								return fifoQueue.NumTotal() <= w.opts.Concurrency
+							},
 						)
 						if err != nil {
 							return nil, err
@@ -312,7 +311,9 @@ func (w *Worker) Run() error {
 
 					// Pass the function to retryIfFailed
 					return w.retryIfFailed(processJobFunc, w.opts.RunRetryDelay)
-				})
+				}); err != nil {
+					w.Emit("error", fmt.Sprintf("Error processing job: %v", err))
+				}
 			}
 		}
 	}()
@@ -324,7 +325,9 @@ func (w *Worker) Run() error {
 func (w *Worker) getNextJob(token string, opts GetNextJobOptions) (*types.Job, error) {
 	if w.paused {
 		if opts.Block {
-			// Wait for resume event, not even sure how? Possible pause actually needs to be a wait group?
+			for w.paused && !w.closing {
+				time.Sleep(100 * time.Millisecond)
+			}
 		} else {
 			return nil, nil
 		}
@@ -334,48 +337,42 @@ func (w *Worker) getNextJob(token string, opts GetNextJobOptions) (*types.Job, e
 		return nil, nil
 	}
 
-	// TODO: Implement getNextJob logic, need all of this, very critical
+	if w.drained && opts.Block && w.limitUntil == 0 {
+		jobID, err := w.waitForJob()
+		if err != nil {
+			if !w.paused && !w.closing {
+				return nil, fmt.Errorf("failed to wait for job: %v", err)
+			}
+			return nil, nil
+		}
 
-	return nil, nil
-
-	//if (this.drained && block && !this.limitUntil && !this.waiting) {
-	//	try {
-	//		this.waiting = this.waitForJob();
-	//		try {
-	//		const jobId = await this.waiting;
-	//		return this.moveToActive(token, jobId);
-	//	} finally {
-	//		this.waiting = null;
-	//	}
-	//	} catch (err) {
-	//		// Swallow error if locally paused or closing since we did force a disconnection
-	//		if (
-	//			!(this.paused || this.closing) &&
-	//				isNotConnectionError(<Error>err)
-	//	) {
-	//			throw err;
-	//		}
-	//	}
-	//} else {
-	//	if (this.limitUntil) {
-	//		this.abortDelayController?.abort();
-	//		this.abortDelayController = new AbortController();
-	//		await this.delay(this.limitUntil, this.abortDelayController);
-	//	}
-	//	return this.moveToActive(token);
-	//}
-
-	//return w.moveToActive(token, "")
+		j, err := w.moveToActive(token, jobID)
+		if err != nil {
+			return nil, err
+		}
+		return j, nil
+	} else {
+		if w.limitUntil != 0 {
+			if err := w.delay(w.limitUntil); err != nil {
+				return nil, fmt.Errorf("failed to delay: %v", err)
+			}
+		}
+		j, err := w.moveToActive(token, "")
+		if err != nil {
+			return nil, err
+		}
+		return j, nil
+	}
 }
 
 // TODO: rateLimit - Overrides the rate limit to be active for the next jobs.
 
 // moveToActive moves the job to the active list
-func (w *Worker) moveToActive(token string, jobId string) (types.Job, error) {
-	if jobId != "" && jobId[0:2] == "0:" {
+func (w *Worker) moveToActive(token string, jobId string) (*types.Job, error) {
+	if jobId != "" && len(jobId) > 2 && jobId[0:2] == "0:" {
 		blockUntil, err := strconv.Atoi(jobId[2:])
 		if err != nil {
-			return types.Job{}, fmt.Errorf("failed to parse blockUntil: %v", err)
+			return nil, fmt.Errorf("failed to parse blockUntil: %v", err)
 		}
 		w.blockUntil = int64(blockUntil)
 	}
@@ -393,43 +390,46 @@ func (w *Worker) moveToActive(token string, jobId string) (types.Job, error) {
 		w.KeyPrefix + "pc",
 	}
 
-	msgPacked, err := msgpack.Marshal(struct {
-		token        string             `msgpack:"token"`
-		lockDuration int                `msgpack:"lockDuration"`
-		limiter      RateLimiterOptions `msgpack:"limiter"`
-	}{
-		token:        token,
-		lockDuration: w.opts.LockDuration,
-		limiter:      *w.opts.Limiter,
-	})
-	if err != nil {
-		return types.Job{}, fmt.Errorf("failed to marshal: %v", err)
+	opts := map[string]interface{}{
+		"token":        token,
+		"lockDuration": 30000,
+		"limiter":      w.opts.Limiter,
 	}
 
-	rawResult, err := lua.MoveToActive(w.redisClient, keys, w.KeyPrefix, time.Now().Unix(), jobId, msgPacked)
+	msgPackedOpts, err := msgpack.Marshal(opts)
 	if err != nil {
-		return types.Job{}, err
+		return nil, fmt.Errorf("failed to marshal: %v", err)
+	}
+
+	rawResult, err := lua.MoveToActive(w.redisClient, keys, w.KeyPrefix, time.Now().Unix(), jobId, string(msgPackedOpts))
+	if err != nil {
+		return nil, err
 	}
 
 	// Assert rawResults to []interface{}
 	rawResultSlice, ok := rawResult.([]interface{})
 	if !ok {
-		return types.Job{}, fmt.Errorf("unexpected type for rawResult: %T", rawResult)
+		return nil, fmt.Errorf("unexpected type for rawResult: %T", rawResult)
 	}
 
 	// Process results using raw2NextJobData
 	result := raw2NextJobData(rawResultSlice)
 
+	// Check if the result indicates an invalid or non-existent job
+	if result.ID == "0" || result.ID == "" {
+		return nil, nil
+	}
+
 	job, err := w.nextJobFromJobData(result.JobData, result.ID, result.LimitUntil, result.DelayUntil, token)
 	if err != nil {
-		return types.Job{}, err
+		return nil, fmt.Errorf("failed to next job from job data: %v", err)
 	}
-	return *job, err
+	return job, nil
 }
 
 // raw2NextJobData processes raw data and returns a typed NextJobData structure
 func raw2NextJobData(raw []interface{}) *NextJobData {
-	if raw == nil || len(raw) < 4 {
+	if len(raw) < 4 {
 		// Return nil if data is invalid
 		return nil
 	}
@@ -449,9 +449,41 @@ func raw2NextJobData(raw []interface{}) *NextJobData {
 	return result
 }
 
-// TODO: waitForJob
+// waitForJob waits for a job ID from the wait list
+func (w *Worker) waitForJob() (string, error) {
+	blockTimeout := math.Max(float64(w.opts.DrainDelay), 0.01)
+	if w.blockUntil > 0 {
+		blockTimeout = math.Max(float64((w.blockUntil-time.Now().UnixMilli())/1000), 0.01)
+	}
 
-// TODO: delay
+	// // Only Redis v6.0.0 and above supports doubles as block time
+	// blockTimeout = isRedisVersionLowerThan(
+	//   this.blockingConnection.redisVersion,
+	//   '6.0.0',
+	// )
+	//   ? Math.ceil(blockTimeout)
+	//   : blockTimeout;
+
+	// We restrict the maximum block timeout to 10 second to avoid
+	// blocking the connection for too long in the case of reconnections
+	// reference: https://github.com/taskforcesh/bullmq/issues/1658
+	blockTimeout = math.Min(blockTimeout, 10)
+
+	result, err := w.redisClient.BRPopLPush(w.ctx, w.KeyPrefix+"wait", w.KeyPrefix+"active", time.Duration(blockTimeout)).Result()
+	if err != nil {
+		return "", err
+	}
+	return result, nil
+}
+
+// delay delays the execution for the specified time
+func (w *Worker) delay(until int64) error {
+	now := time.Now().UnixMilli()
+	if until > now {
+		time.Sleep(time.Duration(until-now) * time.Millisecond)
+	}
+	return nil
+}
 
 // nextJobFromJobData processes the next job data and returns a Job.
 func (w *Worker) nextJobFromJobData(
@@ -468,13 +500,16 @@ func (w *Worker) nextJobFromJobData(
 			w.drained = true
 			w.blockUntil = 0
 		}
-		return nil, nil
 	}
 
 	// Update limitUntil and delayUntil
 	w.limitUntil = int64(math.Max(float64(limitUntil), 0))
 	if delayUntil > 0 {
 		w.blockUntil = int64(math.Max(float64(delayUntil), 0))
+	}
+
+	if jobData == nil {
+		return nil, nil
 	}
 
 	// Process jobData if present
@@ -492,7 +527,7 @@ func (w *Worker) nextJobFromJobData(
 }
 
 // processJob processes the job
-func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func() int) (types.Job, error) {
+func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func() bool) (types.Job, error) {
 	if w.closing || w.paused {
 		return types.Job{}, nil
 	}
@@ -525,7 +560,7 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 			return types.Job{}, err
 		}
 
-		errMoveToFailed := JobMoveToFailed(w.ctx, w.redisClient, w.KeyPrefix, err, token)
+		errMoveToFailed := JobMoveToFailed(w.ctx, w.redisClient, w.KeyPrefix, &job, err, token)
 		if errMoveToFailed != nil {
 			w.Emit("error", errMoveToFailed)
 			return types.Job{}, errMoveToFailed
@@ -535,22 +570,153 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 		return types.Job{}, err
 	}
 
-	//const completed = await job.moveToCompleted(
-	//	result,
-	//	token,
-	//	fetchNextCallback() && !(this.closing || this.paused),
-	//);
-	_ = JobMoveToCompleted(w.ctx, w.redisClient, w.KeyPrefix, result, token)
-	w.Emit("completed", job, result, "active")
-	//const [jobData, jobId, limitUntil, delayUntil] = completed || [];
-	//return this.nextJobFromJobData(
-	//	jobData,
-	//	jobId,
-	//	limitUntil,
-	//	delayUntil,
-	//	token,
-	//);
+	// Move job to completed and fetch next if needed
+	keys, args, err := func(ctx context.Context, client redis.Cmdable, queueKey string, job *types.Job, result interface{}, token string, getNext bool) ([]string, []interface{}, error) {
+		job.Returnvalue = result
 
+		stringifiedReturnValue, err := json.Marshal(result)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to marshal return value: %v", err)
+		}
+
+		stringifiedJsonReturnValueWithJobId, err := json.Marshal(struct {
+			Returnvalue interface{} `json:"returnvalue"`
+			Id          string      `json:"id"`
+		}{
+			Returnvalue: result,
+			Id:          job.Id,
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to marshal return value with job id: %v", err)
+		}
+
+		// workerKeepJobs := w.opts.RemoveOnComplete
+		// keepJobs := workerKeepJobs
+		metricsKey := fmt.Sprintf("%smetrics:%s", w.KeyPrefix, "completed")
+
+		keys := []string{
+			w.KeyPrefix + "wait",
+			w.KeyPrefix + "active",
+			w.KeyPrefix + "prioritized",
+			w.KeyPrefix + "events",
+			w.KeyPrefix + "stalled",
+			w.KeyPrefix + "limiter",
+			w.KeyPrefix + "delayed",
+			w.KeyPrefix + "paused",
+			w.KeyPrefix + "meta",
+			w.KeyPrefix + "pc",
+			w.KeyPrefix + "completed",
+			w.KeyPrefix + job.Id,
+			metricsKey,
+		}
+
+		// TODO: Some of this data should not be hard coded, kinda defeats the point
+		opts := map[string]interface{}{
+			"token": token,
+			"keepJobs": map[string]interface{}{
+				"Age":   0,
+				"Count": -1,
+			},
+			"lockDuration":   30000,
+			"attempts":       job.Opts.Attempts,
+			"attemptsMade":   job.AttemptsMade,
+			"maxMetricsSize": "",
+			"fpof":           false,
+			"rdof":           false,
+		}
+
+		packedOpts, err := msgpack.Marshal(opts)
+
+		if err != nil {
+			return nil, nil, err
+		}
+
+		args := []interface{}{
+			job.Id,
+			time.Now().Unix(),
+			"returnvalue",
+			stringifiedReturnValue,
+			"completed",
+			stringifiedJsonReturnValueWithJobId,
+			(getNext && !(w.closing || w.paused)),
+			w.KeyPrefix,
+			packedOpts,
+		}
+
+		return keys, args, nil
+	}(w.ctx, w.redisClient, w.KeyPrefix, &job, result, token, (fetchNextCallback() && !(w.closing || w.paused)))
+	if err != nil {
+		w.Emit("error", fmt.Sprintf("Error moving job to completed: %v", err))
+		return types.Job{}, err
+	}
+
+	completed, err := func(id string, keys []string, args []interface{}) ([]interface{}, error) {
+		rawResult, err := lua.MoveToFinished(w.redisClient, keys, args...)
+		if err != nil {
+			return []interface{}{}, err
+		}
+
+		rawResultSlice, ok := rawResult.(int64)
+		if !ok {
+			// Attempt to type assert rawResult to a []interface{}
+			rawResultSliceInterface, ok := rawResult.([]interface{})
+			if !ok {
+				return []interface{}{}, fmt.Errorf("unexpected type for rawResult: %T", rawResult)
+			}
+
+			return []interface{}{rawResultSliceInterface}, nil
+		}
+
+		return []interface{}{rawResultSlice}, nil
+	}(job.Id, keys, args)
+	if err != nil {
+		w.Emit("error", fmt.Sprintf("Error moving job to completed: %v", err))
+		return types.Job{}, err
+	}
+
+	job.FinishedOn = time.Unix(args[1].(int64), 0)
+
+	// IF completed[0] is a inteface{} skip this part??
+	if _, ok := completed[0].(int64); !ok {
+		// Just, skip this...
+	} else {
+		if completed[0].(int64) < 0 {
+			switch completed[0].(int64) {
+			case -1:
+				return types.Job{}, fmt.Errorf("missing key for job %s: %d", job.Id, completed)
+			case -2:
+				return types.Job{}, fmt.Errorf("missing lock for job %s: %d", job.Id, completed)
+			case -3:
+				return types.Job{}, fmt.Errorf("not in active set for job %s: %d", job.Id, completed)
+			case -4:
+				return types.Job{}, fmt.Errorf("has pending dependencies for job %s: %d", job.Id, completed)
+			case -6:
+				return types.Job{}, fmt.Errorf("lock is not owned by this client for job %s: %d", job.Id, completed)
+			default:
+				return types.Job{}, fmt.Errorf("unknown error for job %s: %d", job.Id, completed)
+			}
+		}
+	}
+
+	w.Emit("completed", job, result, "active")
+
+	// Parse the completed data
+	nextData := raw2NextJobData(completed)
+	if nextData != nil {
+		// Get the next job
+		j, err := w.nextJobFromJobData(
+			nextData.JobData,
+			nextData.ID,
+			nextData.LimitUntil,
+			nextData.DelayUntil,
+			token,
+		)
+		if err != nil {
+			w.Emit("error", fmt.Sprintf("Error getting next job: %v", err))
+			return types.Job{}, err
+		}
+		return *j, nil
+	}
 	return types.Job{}, nil
 }
 
@@ -691,6 +857,8 @@ func (w *Worker) retryIfFailed(jobFunc func() (*types.Job, error), delay int) (t
 	for {
 		nextJob, err := jobFunc()
 		if err != nil {
+			w.Emit("error", err)
+
 			// Retry only if a delay is specified
 			if delay > 0 {
 				time.Sleep(time.Duration(delay) * time.Millisecond)
@@ -715,7 +883,35 @@ func (w *Worker) retryIfFailed(jobFunc func() (*types.Job, error), delay int) (t
 	}
 }
 
-// TODO: extendLocsk
+// extendLocks extends the locks for the jobs in progress
+func (w *Worker) extendLocks() error {
+	var jobs []*types.Job
+	w.jobsInProgress.Lock()
+	for _, jip := range w.jobsInProgress.jobs {
+		jobs = append(jobs, &jip.job)
+	}
+	w.jobsInProgress.Unlock()
+	return w.extendLocksForJobs(jobs)
+}
+
+// extendLocksForJobs extends the locks for the jobs in progress
+func (w *Worker) extendLocksForJobs(jobs []*types.Job) error {
+	for _, job := range jobs {
+		keys := []string{
+			w.KeyPrefix + "lock",
+			w.KeyPrefix + "stalled",
+		}
+
+		_, err := lua.ExtendLock(w.redisClient, keys, job.Token, w.opts.LockDuration, job.Id)
+		if err != nil {
+			// Log or handle the error if the lock cannot be extended
+			w.Emit("error", fmt.Errorf("could not renew lock for job %s: %w", job.Id, err))
+			return err
+		}
+	}
+
+	return nil
+}
 
 // moveStalledJobsToWait moves stalled jobs to the wait list
 func (w *Worker) moveStalledJobsToWait() error {
