@@ -63,6 +63,8 @@ type Worker struct {
 	blockUntil int64
 	limitUntil int64
 	drained    bool
+
+	scripts *scripts
 }
 
 type WorkerOptions struct {
@@ -162,6 +164,8 @@ func NewWorker(ctx context.Context, name string, opts WorkerOptions, connection 
 		return nil, errors.New("redis client is not a *redis.Client")
 	}
 	client.Do(w.ctx, "CLIENT", "SETNAME", fmt.Sprintf("%s:%s", w.Prefix, base64.StdEncoding.EncodeToString([]byte(w.Name))))
+
+	w.scripts = newScripts(w.redisClient, w.ctx, w.KeyPrefix)
 
 	if opts.Autorun {
 		err := w.Run()
@@ -538,7 +542,20 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 	w.jobsInProgress.jobs[job.Id] = jobInProgress{job: job, ts: time.Now()}
 	w.jobsInProgress.Unlock()
 
-	result, err := w.processFn(w.ctx, &job)
+	var result interface{}
+	var err error
+
+	// Wrap processFn call with recover to handle panics
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				w.Emit("error", fmt.Sprintf("Panic recovered for job %s with token %s: %v", job.Id, token, r))
+				err = fmt.Errorf("panic: %v", r)
+			}
+		}()
+
+		result, err = w.processFn(w.ctx, &job)
+	}()
 
 	// Remove job from jobsInProgress
 	for _, jp := range w.jobsInProgress.jobs {
@@ -560,13 +577,66 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 			return types.Job{}, err
 		}
 
-		errMoveToFailed := JobMoveToFailed(w.ctx, w.redisClient, w.KeyPrefix, &job, err, token)
-		if errMoveToFailed != nil {
-			w.Emit("error", errMoveToFailed)
-			return types.Job{}, errMoveToFailed
+		if err != nil {
+			w.Emit("error", fmt.Sprintf("Error moving job to failed: %v", err))
+			return types.Job{}, err
 		}
 
+		// job.moveToFailed
+		func(err error, token string) {
+			job.FailedReason = err.Error()
+
+			// this.saveStacktrace(multi,err);
+
+			//
+			// Check if an automatic retry should be performed
+			//
+			moveToFailed := false
+			var finishedOn time.Time
+
+			if job.AttemptsMade < job.Opts.Attempts {
+				// const opts = queue.opts as WorkerOptions;
+
+				// // Check if backoff is needed
+				// const delay = await Backoffs.calculate(
+				//   <BackoffOptions>this.opts.backoff,
+				//   this.attemptsMade,
+				//   err,
+				//   this,
+				//   opts.settings && opts.settings.backoffStrategy,
+				// );
+
+				// if (delay === -1) {
+				//   moveToFailed = true;
+				// } else if (delay) {
+				//   const args = this.scripts.moveToDelayedArgs(
+				// 	this.id,
+				// 	Date.now() + delay,
+				// 	token,
+				//   );
+				//   (<any>multi).moveToDelayed(args);
+				//   command = 'delayed';
+				// } else {
+				//   // Retry immediately
+				//   (<any>multi).retryJob(
+				// 	this.scripts.retryJobArgs(this.id, this.opts.lifo, token),
+				//   );
+				//   command = 'retryJob';
+				// }
+			} else {
+				moveToFailed = true
+			}
+
+			if moveToFailed {
+				keys, args, err := w.scripts.moveToFailedArgs(w.KeyPrefix, job.Id, token)
+				if err != nil {
+					w.Emit("error", fmt.Sprintf("Error moving job to failed: %v", err))
+					return
+				}
+		}(err, token)
+
 		w.Emit("failed", job, err, "active")
+
 		return types.Job{}, err
 	}
 

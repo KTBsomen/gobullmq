@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/go-redis/redis/v8"
 	"go.codycody31.dev/gobullmq"
@@ -27,7 +29,9 @@ func main() {
 	// Define the worker process function
 	workerProcess := func(ctx context.Context, job *types.Job) (interface{}, error) {
 		fmt.Printf("Processing job: %s\n", job.Id)
-		return nil, nil
+		fmt.Printf("Data: %v\n", job.Data)
+		time.Sleep(5 * time.Second)
+		return nil, errors.New("job failed")
 	}
 
 	// Initialize the worker
@@ -83,7 +87,7 @@ func main() {
 	}
 
 	// Add jobs to the queue
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 1; i++ {
 		if _, err := queue.Add("test", jobData); err != nil {
 			fmt.Println("Error adding job:", err)
 		}
@@ -95,9 +99,6 @@ func main() {
 	// 	fmt.Println("Error adding repeatable job:", err)
 	// }
 
-	worker.On("completed", func(args ...interface{}) {
-		fmt.Println("Job completed:", args)
-	})
 	worker.On("error", func(args ...interface{}) {
 		fmt.Println("Worker error:", args)
 	})
