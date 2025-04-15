@@ -25,20 +25,52 @@ go get go.codycody31.dev/gobullmq
 Create a new queue and add jobs to it:
 
 ```go
-ctx := context.Background()
-queue, err := gobullmq.NewQueue(ctx, "myQueue", gobullmq.QueueOption{
-    RedisIp:     "127.0.0.1:6379",
-    RedisPasswd: "",
-})
-if err != nil {
-    log.Fatal(err)
+import (
+	"context"
+	"log"
+
+	"github.com/go-redis/redis/v8"
+	"go.codycody31.dev/gobullmq"
+	"go.codycody31.dev/gobullmq/types"
+)
+
+func main() {
+	ctx := context.Background()
+	redisOpts := &redis.Options{
+		Addr: "127.0.0.1:6379", // Or your Redis server address
+		// Password: "your_password", // Uncomment if needed
+		DB: 0, // Default DB
+	}
+
+	queue, err := gobullmq.NewQueue(ctx, "myQueue",
+		gobullmq.WithRedisOptions(redisOpts),
+		// Optional: Set a custom key prefix
+		// gobullmq.WithKeyPrefix("myCustomPrefix"),
+	)
+	if err != nil {
+		log.Fatalf("Failed to create queue: %v", err)
+	}
+
+	// Define job data (can be any struct that can be JSON marshaled)
+	jobData := struct {
+		Message string
+		Count   int
+	}{
+		Message: "Hello BullMQ!",
+		Count:   1,
+	}
+
+	// Add a job using functional options
+	job, err := queue.Add(ctx, "myJob", jobData,
+		gobullmq.AddWithPriority(5),
+		gobullmq.AddWithDelay(2000), // Delay by 2 seconds
+	)
+	if err != nil {
+		log.Fatalf("Failed to add job: %v", err)
+	}
+	log.Printf("Added job %s with ID: %s\n", job.Name, job.Id)
 }
 
-jobData := types.JobData{"foo": "bar"}
-_, err = queue.Add("myJob", jobData, gobullmq.JobOptionWithPriority(1))
-if err != nil {
-    log.Fatal(err)
-}
 ```
 
 ### Worker
@@ -94,11 +126,14 @@ events.On("error", func(args ...interface{}) {
 
 ## Configuration
 
-### Queue Options
+Configuration is primarily done using functional options passed to `NewQueue`, `NewWorker`, and `NewQueueEvents`.
 
-- `RedisIp`: The IP address of the Redis server.
-- `RedisPasswd`: The password for the Redis server.
-- `KeyPrefix`: The prefix for Redis keys.
+### Queue Functional Options
+
+- `WithRedisOptions(*redis.Options)`: **Recommended**. Sets the Redis connection options using a `redis.Options` struct.
+- `WithKeyPrefix(string)`: Sets a custom prefix for Redis keys (default is "bull").
+- `WithStreamsEventsMaxLen(int64)`: Sets the maximum length for the events stream (default 10000).
+- `WithLegacyRedisConfig(ip, password, mode)`: **DEPRECATED**. Use `WithRedisOptions` instead.
 
 ### Worker Options
 
@@ -112,12 +147,31 @@ events.On("error", func(args ...interface{}) {
 
 ## Examples
 
+### Adding a Job with Options
+
+```go
+jobData := map[string]string{"task": "send_email", "to": "user@example.com"}
+
+job, err := queue.Add(ctx, "emailJob", jobData,
+    gobullmq.AddWithPriority(2),
+    gobullmq.AddWithDelay(5000), // Delay 5 seconds
+    gobullmq.AddWithAttempts(3),
+    gobullmq.AddWithRemoveOnComplete(gobullmq.KeepJobs{Count: 100}), // Keep last 100 completed
+)
+if err != nil {
+    log.Fatalf("Failed to add email job: %v", err)
+}
+```
+
 ### Adding a Repeatable Job
 
 ```go
-_, err = queue.Add("myRepeatableJob", jobData, gobullmq.JobOptionWithRepeat(types.JobRepeatOptions{
-    Every: 1000,
-}))
+// Add a job that repeats every 10 seconds
+_, err = queue.Add(ctx, "myRepeatableJob", jobData,
+    gobullmq.AddWithRepeat(types.JobRepeatOptions{
+        Every: 10000, // Repeat every 10000 ms (10 seconds)
+    }),
+)
 if err != nil {
     log.Fatal(err)
 }

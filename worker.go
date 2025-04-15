@@ -56,7 +56,6 @@ type Worker struct {
 	// Locks
 	extendLocksTimer  *time.Timer
 	stalledCheckTimer *time.Timer
-	lemu              sync.Mutex
 
 	jobsInProgress *jobsInProgress
 
@@ -75,8 +74,8 @@ type WorkerOptions struct {
 	Prefix           string
 	MaxStalledCount  int
 	StalledInterval  int
-	RemoveOnComplete *KeepJobs
-	RemoveOnFail     *KeepJobs
+	RemoveOnComplete *types.KeepJobs
+	RemoveOnFail     *types.KeepJobs
 	SkipStalledCheck bool
 	SkipLockRenewal  bool
 	DrainDelay       int
@@ -85,10 +84,10 @@ type WorkerOptions struct {
 	RunRetryDelay    int
 }
 
-type KeepJobs struct {
-	Age   int // Maximum age in seconds for job to be kept.
-	Count int // Maximum count of jobs to be kept.
-}
+// type KeepJobs struct { // Moved to types/job.go
+// 	Age   int // Maximum age in seconds for job to be kept.
+// 	Count int // Maximum count of jobs to be kept.
+// }
 
 type RateLimiterOptions struct {
 	Max      int `msgpack:"max"`
@@ -197,19 +196,23 @@ func (w *Worker) Once(event string, listener func(...interface{})) {
 	w.ee.Once(event, listener)
 }
 
+// createJob constructs a Job struct from the map data retrieved from Redis.
 func (w *Worker) createJob(jobData map[string]interface{}, jobId string) types.Job {
-	// Convert jobData to map[string]string
-	convertedData, err := utils.ConvertToMapString(jobData)
-	if err != nil {
-		fmt.Printf("Error converting jobData: %v\n", err)
-		return types.Job{
-			Id: jobId,
-		}
-	}
+	// We now directly receive map[string]interface{} from raw2NextJobData/Array2obj
+	// No need for ConvertToMapString anymore.
 
-	// Use the converted map for JobFromJson
-	job, err := JobFromJson(convertedData)
+	// ---- Logging the received map ----
+	// fmt.Printf("--- Worker Creating Job %s (map[string]interface{}) ---\n", jobId)
+	// for k, v := range jobData {
+	// 	fmt.Printf("  %s (%T): %v\n", k, v, v)
+	// }
+	// ---------------------------------
+
+	// Pass the map[string]interface{} directly to JobFromJson
+	job, err := JobFromJson(jobData) // Pass map[string]interface{}
 	if err != nil {
+		// Log error during JobFromJson parsing
+		// fmt.Printf("Error parsing job data in JobFromJson for job %s: %v\n", jobId, err) // Keep commented
 		return types.Job{
 			Id: jobId,
 		}
@@ -240,84 +243,121 @@ func (w *Worker) Run() error {
 
 	go w.startLockExtender()
 
-	fifoQueue := fifoqueue.NewFifoQueue[types.Job](10, false)
+	fifoQueue := fifoqueue.NewFifoQueue[types.Job](w.opts.Concurrency, false) // Use concurrency for queue size
 	tokenPostfix := 0
+
+	// Helper function to add a fetch task
+	addFetchTask := func() {
+		if w.closing || w.paused {
+			return
+		}
+		tokenPostfix++
+		token := fmt.Sprintf("%s:%d", w.Token, tokenPostfix)
+		if err := fifoQueue.Add(func() (types.Job, error) {
+			j, err := w.retryIfFailed(func() (*types.Job, error) {
+				// Fetch the next job
+				nextJob, err := w.getNextJob(token, GetNextJobOptions{Block: true})
+				if err != nil {
+					return nil, err // Propagate error
+				}
+				if nextJob == nil {
+					// No job available, return empty job (Id="") to signal this
+					return nil, nil // Use nil job, nil error for no job case
+				}
+				// Assign token here as getNextJob doesn't return it directly in the Job struct anymore
+				nextJob.Token = token
+				return nextJob, nil
+			}, w.opts.RunRetryDelay) // Configurable retry delay
+
+			// Handle errors from retryIfFailed
+			if err != nil {
+				// Emit error but return empty job to allow loop to continue/add new fetch
+				w.Emit("error", fmt.Sprintf("Error fetching job: %v", err))
+				return types.Job{}, err // Return empty job and the error
+			}
+
+			// Handle the case where retryIfFailed returns an empty job ID (e.g., after timeout)
+			if j.Id == "" {
+				return types.Job{}, nil // Return empty job, nil error
+			}
+
+			return j, nil // Return the fetched job
+		}); err != nil {
+			w.Emit("error", fmt.Sprintf("Error adding fetch task to queue: %v", err))
+			// Consider if we should retry adding the fetch task or just let the loop continue
+		}
+	}
 
 	w.wg.Add(1)
 	go func() {
+		defer w.wg.Done() // Ensure WaitGroup is decremented on exit
+
+		// Initial fill of fetch tasks up to concurrency limit
+		for i := 0; i < w.opts.Concurrency; i++ {
+			addFetchTask()
+		}
+
 		for {
 			select {
 			case <-w.ctx.Done():
-				w.wg.Done()
+				// Context cancelled, stop processing
+				// fifoQueue.Fetch will unblock due to context cancellation
+				w.Emit("closing")
 				return
 			default:
+				// Non-blocking check for context cancellation
 			}
 
-			//!this.waiting &&
-			//	asyncFifoQueue.numTotal() < this.opts.concurrency &&
-			//	(!this.limitUntil || asyncFifoQueue.numTotal() == 0)
-			if !w.paused && fifoQueue.NumTotal() < w.opts.Concurrency {
-				tokenPostfix++
-				token := fmt.Sprintf("%s:%d", w.Token, tokenPostfix)
+			// Fetch the result of the next completed task (either fetch or process)
+			// Fetch blocks until a task is available or the context is cancelled/queue closed
+			jobResult, taskErr := fifoQueue.Fetch(w.ctx)
 
-				if err := fifoQueue.Add(func() (types.Job, error) {
-					j, err := w.retryIfFailed(func() (*types.Job, error) {
-						// Fetch the next job
-						nextJob, err := w.getNextJob(token, GetNextJobOptions{Block: true})
-						if err != nil {
-							return nil, err
-						}
-
-						if nextJob == nil {
-							// Sleep briefly to avoid tight loop when no jobs are available
-							time.Sleep(time.Second)
-							return nil, nil
-						}
-
-						return nextJob, nil
-					}, w.opts.RunRetryDelay)
-					if err != nil {
-						return types.Job{}, err
-					}
-
-					return j, nil
-				}); err != nil {
-					w.Emit("error", fmt.Sprintf("Error adding job to queue: %v", err))
-					continue
+			// Check for errors during fetch (e.g., context cancelled, queue closed)
+			if taskErr != nil {
+				if errors.Is(taskErr, context.Canceled) || errors.Is(taskErr, fifoqueue.ErrQueueClosed) {
+					w.Emit("info", fmt.Sprintf("Worker stopping due to context cancellation or queue closure: %v", taskErr))
+					return // Exit goroutine
 				}
-			}
-
-			job, err := fifoQueue.Fetch(w.ctx)
-			if err != nil {
-				if err != context.Canceled && !errors.Is(err, fifoqueue.ErrQueueClosed) && !errors.Is(err, errors.New("no job available")) {
-					w.Emit("error", fmt.Sprintf("Critical error in fetch: %v", err))
-				}
+				// Log other fetch errors but attempt to continue
+				// taskErr might contain the error from the *task* itself (fetch or process)
+				w.Emit("error", fmt.Sprintf("Error fetching task result from queue: %v", taskErr))
+				// Decide if we should add a new fetch task even on error
+				addFetchTask() // Add a new fetch task to keep the cycle going
 				continue
 			}
 
-			if job != nil && job.Id != "" && job.Id != "0" {
-				token := job.Token
-				if err := fifoQueue.Add(func() (types.Job, error) {
-					// Define the function to process the job
-					processJobFunc := func() (*types.Job, error) {
-						processJob, err := w.processJob(
-							*job,
-							token,
-							func() bool {
-								return fifoQueue.NumTotal() <= w.opts.Concurrency
-							},
-						)
-						if err != nil {
-							return nil, err
-						}
-						return &processJob, nil
-					}
+			// --- Task completed successfully (or returned a specific error result) ---
 
-					// Pass the function to retryIfFailed
-					return w.retryIfFailed(processJobFunc, w.opts.RunRetryDelay)
+			// Check if the result is a valid job (meaning it was a fetch task that succeeded)
+			if jobResult != nil && jobResult.Id != "" && jobResult.Id != "0" {
+				// --- Fetch Task Completed: Got a Job ---
+				fetchedJob := *jobResult
+				token := fetchedJob.Token // Get token associated during fetch
+
+				// Add the process task for the fetched job
+				if err := fifoQueue.Add(func() (types.Job, error) {
+					// Directly call processJob. It handles its own errors/results.
+					_, processErr := w.processJob(
+						fetchedJob, // Pass the actual fetched job struct
+						token,
+						func() bool {
+							// Check concurrency for *fetching* the next job *after* this one
+							return fifoQueue.NumTotal() < w.opts.Concurrency
+						},
+					)
+					// processJob emits 'completed' or 'failed'/'error'
+					// Return empty job. The error determines if the loop adds a new fetch task.
+					return types.Job{}, processErr // Error signals failure, nil signals success
 				}); err != nil {
-					w.Emit("error", fmt.Sprintf("Error processing job: %v", err))
+					// Failed to add the process task. Job remains 'active'. Stalled check should handle it.
+					w.Emit("error", fmt.Sprintf("Error adding process task for job %s: %v", fetchedJob.Id, err))
+					// Should we add a fetch task here? If adding process fails, maybe we need capacity.
+					addFetchTask() // Add a fetch task as the processor slot is now technically free
 				}
+			} else {
+				// --- Process Task Completed OR Fetch Task Got No Job ---
+				// Add a new fetch task to keep the worker busy
+				addFetchTask()
 			}
 		}
 	}()
@@ -347,6 +387,12 @@ func (w *Worker) getNextJob(token string, opts GetNextJobOptions) (*types.Job, e
 			if !w.paused && !w.closing {
 				return nil, fmt.Errorf("failed to wait for job: %v", err)
 			}
+			return nil, nil
+		}
+
+		fmt.Println("jobID", jobID)
+
+		if jobID == "" {
 			return nil, nil
 		}
 
@@ -402,10 +448,11 @@ func (w *Worker) moveToActive(token string, jobId string) (*types.Job, error) {
 
 	msgPackedOpts, err := msgpack.Marshal(opts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal: %v", err)
+		return nil, fmt.Errorf("failed to marshal opts: %w", err)
 	}
 
-	rawResult, err := lua.MoveToActive(w.redisClient, keys, w.KeyPrefix, time.Now().Unix(), jobId, string(msgPackedOpts))
+	// Pass current time in MILLISECONDS for comparing against delayed set scores
+	rawResult, err := lua.MoveToActive(w.redisClient, keys, w.KeyPrefix, time.Now().UnixMilli(), jobId, string(msgPackedOpts))
 	if err != nil {
 		return nil, err
 	}
@@ -419,7 +466,15 @@ func (w *Worker) moveToActive(token string, jobId string) (*types.Job, error) {
 	// Process results using raw2NextJobData
 	result := raw2NextJobData(rawResultSlice)
 
-	// Check if the result indicates an invalid or non-existent job
+	// Add a check here to ensure result is not nil
+	if result == nil {
+		// This might happen if raw data was invalid
+		// Log this situation, as it indicates unexpected data from Lua
+		w.Emit("error", fmt.Sprintf("moveToActive received invalid data from Lua for token %s, jobID %s", token, jobId))
+		return nil, nil // Treat as no job found
+	}
+
+	// Check if the result indicates an invalid or non-existent job ID
 	if result.ID == "0" || result.ID == "" {
 		return nil, nil
 	}
@@ -432,22 +487,37 @@ func (w *Worker) moveToActive(token string, jobId string) (*types.Job, error) {
 }
 
 // raw2NextJobData processes raw data and returns a typed NextJobData structure
+// It includes additional type checks for safety.
 func raw2NextJobData(raw []interface{}) *NextJobData {
 	if len(raw) < 4 {
-		// Return nil if data is invalid
-		return nil
+		return nil // Not enough elements
 	}
 
-	// Initialize the result structure
+	// Safely check types for LimitUntil and DelayUntil
+	limitVal, limitOk := raw[2].(int64)
+	delayVal, delayOk := raw[3].(int64)
+
+	if !limitOk || !delayOk {
+		// Log error: Unexpected type for limit or delay
+		// fmt.Printf("raw2NextJobData: Unexpected type for limit/delay. Limit type: %T, Delay type: %T\n", raw[2], raw[3]) // Keep commented
+		return nil // Invalid data
+	}
+
 	result := &NextJobData{
-		ID:         fmt.Sprintf("%v", raw[1]),
-		LimitUntil: int64(math.Max(float64(raw[2].(int64)), 0)),
-		DelayUntil: int64(math.Max(float64(raw[3].(int64)), 0)),
+		ID:         fmt.Sprintf("%v", raw[1]), // ID can be various types, Sprintf handles it
+		LimitUntil: int64(math.Max(float64(limitVal), 0)),
+		DelayUntil: int64(math.Max(float64(delayVal), 0)),
 	}
 
-	// Process raw[0] if it exists
+	// Process raw[0] (job data) if it exists and is valid
 	if raw[0] != nil {
-		result.JobData = utils.Array2obj(raw[0])
+		// Note: Assuming Array2obj handles potential errors internally or returns nil on failure.
+		jobMap := utils.Array2obj(raw[0])
+		if jobMap == nil {
+			// Log error: Array2obj returned nil map, possibly due to invalid input structure
+			// fmt.Println("raw2NextJobData: Array2obj returned nil map for job data") // Keep commented
+		}
+		result.JobData = jobMap
 	}
 
 	return result
@@ -520,7 +590,7 @@ func (w *Worker) nextJobFromJobData(
 	w.drained = false
 	job := w.createJob(jobData, jobID)
 	job.Token = token
-	if job.Opts.Repeat.Every != 0 || job.Opts.Repeat.Pattern != "" {
+	if job.Opts.Repeat != nil && (job.Opts.Repeat.Every != 0 || job.Opts.Repeat.Pattern != "") {
 		// TODO: Repeatable.AddNextRepeatableJob
 		//err := w.Repeatable.AddNextRepeatableJob("jobName", job.Data, job.Opts)
 		//if err != nil {
@@ -558,14 +628,9 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 	}()
 
 	// Remove job from jobsInProgress
-	for _, jp := range w.jobsInProgress.jobs {
-		if jp.job.Id == job.Id {
-			w.jobsInProgress.Lock()
-			delete(w.jobsInProgress.jobs, job.Id)
-			w.jobsInProgress.Unlock()
-			break
-		}
-	}
+	w.jobsInProgress.Lock()
+	delete(w.jobsInProgress.jobs, job.Id)
+	w.jobsInProgress.Unlock()
 
 	if err != nil {
 		if err.Error() == RateLimitError {
@@ -578,7 +643,7 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 		}
 
 		if err != nil {
-			w.Emit("error", fmt.Sprintf("Error moving job to failed: %v", err))
+			w.Emit("error", fmt.Sprintf("moving job to failed per: %v", err))
 			return types.Job{}, err
 		}
 
@@ -592,7 +657,7 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 			// Check if an automatic retry should be performed
 			//
 			moveToFailed := false
-			var finishedOn time.Time
+			// Variables declared here
 
 			if job.AttemptsMade < job.Opts.Attempts {
 				// const opts = queue.opts as WorkerOptions;
@@ -628,11 +693,12 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 			}
 
 			if moveToFailed {
-				keys, args, err := w.scripts.moveToFailedArgs(w.KeyPrefix, job.Id, token)
-				if err != nil {
-					w.Emit("error", fmt.Sprintf("Error moving job to failed: %v", err))
-					return
+				// Directly call the JobMoveToFailed function
+				if moveErr := JobMoveToFailed(w.scripts, &job, err, token, *w.opts.RemoveOnFail, fetchNextCallback()); moveErr != nil {
+					w.Emit("error", fmt.Sprintf("Error explicitly moving job %s to failed: %v", job.Id, moveErr))
+					// If moving to failed fails, we still need to return the original processing error
 				}
+			}
 		}(err, token)
 
 		w.Emit("failed", job, err, "active")
@@ -640,7 +706,42 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 		return types.Job{}, err
 	}
 
-	// Move job to completed and fetch next if needed
+	// --- Job completed successfully --- //
+
+	// ---- Add Diagnostic Logging ----
+	// fmt.Printf("--- Job %s Completed Successfully ---\n", job.Id)
+	// fmt.Printf("Data Type: %T, Data Value: %v\n", job.Data, job.Data)
+	// if job.Opts.Repeat != nil {
+	// 	fmt.Printf("Repeat Options: %+v\n", *job.Opts.Repeat)
+	// } else {
+	// 	fmt.Println("Repeat Options: <nil>")
+	// }
+	// -------------------------------
+
+	// Check if this is a repeatable job and schedule the next one if needed
+	if job.Opts.Repeat != nil {
+		// Need Queue instance or scripts instance to call scheduleNextRepeatableJob
+		// For now, assume worker has `scripts` which has redisClient and keyPrefix
+		// We need the original JSON data for the job
+		jobJSONData, ok := job.Data.(string)
+		if !ok {
+			// This should not happen if Add marshaled correctly
+			w.Emit("error", fmt.Sprintf("Repeatable job %s has non-string data (%T), cannot reschedule", job.Id, job.Data)) // Added type info
+		} else {
+			// Use a background context for scheduling the next job, as the current job's context might be ending.
+			scheduleCtx := context.Background()                                                     // Or w.ctx if it lives long enough?
+			tempQueue := &Queue{Client: w.redisClient, KeyPrefix: w.KeyPrefix, EventEmitter: *w.ee} // Temporary Queue-like struct for method access, pass event emitter by value
+			if scheduleErr := tempQueue.scheduleNextRepeatableJob(scheduleCtx, job.Name, jobJSONData, job.Opts); scheduleErr != nil {
+				w.Emit("error", fmt.Sprintf("Failed to schedule next instance for repeatable job %s: %v", job.Id, scheduleErr))
+			}
+		}
+	} else {
+		// Add logging here to see if Repeat is nil
+		// fmt.Printf("Job %s completed, but Opts.Repeat is nil. Not rescheduling.\n", job.Id) // Keep commented
+		// fmt.Printf("Job Opts received by worker: %+v\n", job.Opts) // Optional detailed log
+	}
+
+	// Prepare args for moving job to completed state
 	keys, args, err := func(ctx context.Context, client redis.Cmdable, queueKey string, job *types.Job, result interface{}, token string, getNext bool) ([]string, []interface{}, error) {
 		job.Returnvalue = result
 
@@ -874,8 +975,9 @@ func (w *Worker) startLockExtender() {
 	}
 
 	w.extendLocksTimer = time.AfterFunc(time.Duration(w.opts.LockRenewTime/2), func() {
-		w.lemu.Lock()
-		defer w.lemu.Unlock()
+		// Lock using the mutex associated with jobsInProgress
+		w.jobsInProgress.Lock()
+		defer w.jobsInProgress.Unlock()
 		if w.closing || w.opts.SkipLockRenewal {
 			return
 		}

@@ -17,9 +17,14 @@ type RedisJobOptions struct {
 
 // ParentOpts defines options for job parent relationships.
 type ParentOpts struct {
-	waitChildrenKey       string
-	parentDependenciesKey string
-	parentKey             string
+	Id    string `json:"id" msgpack:"id"`       // The job ID of the parent.
+	Queue string `json:"queue" msgpack:"queue"` // The queue prefix (e.g., "bull:myParentQueue") of the parent.
+}
+
+// KeepJobs specifies how many completed/failed jobs to keep.
+type KeepJobs struct {
+	Age   int `json:"age,omitempty" msgpack:"age,omitempty"`     // Maximum age in seconds for job to be kept.
+	Count int `json:"count,omitempty" msgpack:"count,omitempty"` // Maximum count of jobs to be kept.
 }
 
 // JobData represents the data associated with a job.
@@ -30,18 +35,22 @@ type JobOptionFunc func(*JobOptions)
 
 // JobOptions defines options for configuring a job.
 type JobOptions struct {
-	Priority         int    `json:"priority,omitempty" msgpack:"priority,omitempty"`
-	RemoveOnComplete bool   `json:"removeOnComplete,omitempty" msgpack:"removeOnComplete,omitempty"`
-	RemoveOnFail     bool   `json:"removeOnFail,omitempty" msgpack:"removeOnFail,omitempty"`
-	Attempts         int    `json:"attempts,omitempty" msgpack:"attempts,omitempty"`
-	Delay            int    `json:"delay,omitempty" msgpack:"delay,omitempty"`
-	TimeStamp        int64  `json:"timestamp,omitempty" msgpack:"timestamp,omitempty"`
-	Lifo             string `json:"lifo,omitempty" msgpack:"lifo,omitempty"`
-	JobId            string `json:"jobId,omitempty" msgpack:"jobId,omitempty"`
-	RepeatJobKey     string `json:"repeatJobKey,omitempty" msgpack:"repeatJobKey,omitempty"`
-	Token            string `json:"token,omitempty" msgpack:"token,omitempty"` // The token used for locking this job.
+	Priority         int       `json:"priority,omitempty" msgpack:"priority,omitempty"`
+	RemoveOnComplete *KeepJobs `json:"removeOnComplete,omitempty" msgpack:"removeOnComplete,omitempty"`
+	RemoveOnFail     *KeepJobs `json:"removeOnFail,omitempty" msgpack:"removeOnFail,omitempty"`
+	Attempts         int       `json:"attempts,omitempty" msgpack:"attempts,omitempty"`
+	Delay            int       `json:"delay,omitempty" msgpack:"delay,omitempty"`
+	TimeStamp        int64     `json:"timestamp,omitempty" msgpack:"timestamp,omitempty"`
+	Lifo             bool      `json:"lifo,omitempty" msgpack:"lifo,omitempty"`
+	JobId            string    `json:"jobId,omitempty" msgpack:"jobId,omitempty"`
+	RepeatJobKey     string    `json:"repeatJobKey,omitempty" msgpack:"repeatJobKey,omitempty"`
+	Token            string    `json:"token,omitempty" msgpack:"token,omitempty"` // The token used for locking this job.
 
-	Repeat JobRepeatOptions `json:"repeat,omitempty" msgpack:"repeat,omitempty"`
+	Repeat *JobRepeatOptions `json:"repeat,omitempty" msgpack:"repeat,omitempty"`
+
+	// Added fields
+	FailParentOnFailure bool        `json:"failParentOnFailure,omitempty" msgpack:"failParentOnFailure,omitempty"`
+	Parent              *ParentOpts `json:"parent,omitempty" msgpack:"parent,omitempty"`
 }
 
 // JobRepeatOptions defines options for configuring repeatable jobs.

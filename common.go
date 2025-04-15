@@ -1,76 +1,104 @@
 package gobullmq
 
-import "go.codycody31.dev/gobullmq/types"
+import (
+	"go.codycody31.dev/gobullmq/types"
+)
 
-func JobOptionWithPriority(priority int) types.JobOptionFunc {
+// AddOption defines the functional option type for Queue.Add
+type AddOption func(*types.JobOptions)
+
+// AddWithPriority sets the priority for the job.
+// Lower number means higher priority.
+func AddWithPriority(priority int) AddOption {
 	return func(o *types.JobOptions) {
-		if o == nil {
-			return
-		}
 		o.Priority = priority
 	}
 }
 
-func JobOptionRemoveOnComplete(flag bool) types.JobOptionFunc {
+// AddWithRemoveOnComplete configures job removal upon successful completion.
+// If keep is provided, it specifies the number/age criteria.
+// If keep is omitted, it defaults to removing the job immediately (Count: 0).
+func AddWithRemoveOnComplete(keep ...types.KeepJobs) AddOption {
 	return func(o *types.JobOptions) {
-		if o == nil {
-			return
+		setting := types.KeepJobs{Count: 0} // Default: remove immediately
+		if len(keep) > 0 {
+			setting = keep[0]
 		}
-		o.RemoveOnComplete = flag
+		o.RemoveOnComplete = &setting // Use pointer
 	}
 }
 
-func JobOptionRemoveOnFail(flag bool) types.JobOptionFunc {
+// AddWithRemoveOnFail configures job removal upon failure.
+// If keep is provided, it specifies the number/age criteria.
+// If keep is omitted, it defaults to keeping the job (Count: -1).
+func AddWithRemoveOnFail(keep ...types.KeepJobs) AddOption {
 	return func(o *types.JobOptions) {
-		if o == nil {
-			return
+		setting := types.KeepJobs{Count: -1} // Default: keep forever
+		if len(keep) > 0 {
+			setting = keep[0]
 		}
-		o.RemoveOnFail = flag
+		o.RemoveOnFail = &setting // Use pointer
 	}
 }
 
-func JobOptionWithAttempts(times int) types.JobOptionFunc {
+// AddWithAttempts sets the maximum number of attempts for the job.
+func AddWithAttempts(times int) AddOption {
 	return func(o *types.JobOptions) {
-		if o == nil {
-			return
+		if times > 0 {
+			o.Attempts = times
 		}
-		o.Attempts = times
 	}
 }
 
-func JobOptionWithDelay(delayTime int) types.JobOptionFunc {
+// AddWithDelay sets an initial delay (in milliseconds) before the job can be processed.
+func AddWithDelay(delayMillis int) AddOption {
 	return func(o *types.JobOptions) {
-		if o == nil {
-			return
+		if delayMillis > 0 {
+			o.Delay = delayMillis
 		}
-		o.Delay = delayTime
 	}
 }
 
-// JobOptionWithTimeStamp sets the timestamp using time.Now().UnixMilli()
-func JobOptionWithTimeStamp(timeStamp int64) types.JobOptionFunc {
+// AddWithTimestamp sets a custom timestamp for the job.
+// Defaults to time.Now().UnixMilli() if not set.
+func AddWithTimestamp(tsMillis int64) AddOption {
 	return func(o *types.JobOptions) {
-		if o == nil {
-			return
-		}
-		o.TimeStamp = timeStamp
+		o.TimeStamp = tsMillis
 	}
 }
 
-func JobOptionWithJobId(id string) types.JobOptionFunc {
+// AddWithJobID sets a specific ID for the job.
+// Use with caution, as IDs must be unique.
+func AddWithJobID(id string) AddOption {
 	return func(o *types.JobOptions) {
-		if o == nil {
-			return
-		}
 		o.JobId = id
 	}
 }
 
-func JobOptionWithRepeat(repeat types.JobRepeatOptions) types.JobOptionFunc {
+// AddWithRepeat configures the job to repeat based on the provided options.
+func AddWithRepeat(repeatOpts types.JobRepeatOptions) AddOption {
 	return func(o *types.JobOptions) {
-		if o == nil {
-			return
-		}
-		o.Repeat = repeat
+		o.Repeat = &repeatOpts // Use pointer
+	}
+}
+
+// AddWithLifo adds the job using LIFO (Last In, First Out) order.
+func AddWithLifo() AddOption {
+	return func(o *types.JobOptions) {
+		o.Lifo = true
+	}
+}
+
+// AddWithFailParentOnFailure marks the job to fail its parent job if this job fails.
+func AddWithFailParentOnFailure(fail bool) AddOption {
+	return func(o *types.JobOptions) {
+		o.FailParentOnFailure = fail
+	}
+}
+
+// AddWithParent sets the parent job information for this job.
+func AddWithParent(parentOpts types.ParentOpts) AddOption {
+	return func(o *types.JobOptions) {
+		o.Parent = &parentOpts
 	}
 }
