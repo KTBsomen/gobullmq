@@ -2,103 +2,123 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+
 	"github.com/go-redis/redis/v8"
 	"go.codycody31.dev/gobullmq"
 	"go.codycody31.dev/gobullmq/types"
 )
 
 func main() {
-	var q *gobullmq.Queue
-	var queueName string
-	var qEvents *gobullmq.QueueEvents
-	var qWorker *gobullmq.Worker
-	var err error
+	queueName := "test"
+	ctx := context.Background()
 
-	qWorkerProcess := func(ctx context.Context, job *types.Job) (interface{}, error) {
-		fmt.Printf("Received job%s\n\tID: %s\n\tData: %s\n", job.Name, job.Id, job.Data)
+	// Define Redis connection options
+	redisOpts := &redis.Options{
+		Addr: "127.0.0.1:6379",
+		// Password: "", // Add password if needed
+		DB: 0, // Default DB
+	}
+
+	// Initialize the queue using functional options
+	queue, err := gobullmq.NewQueue(ctx, queueName,
+		gobullmq.WithRedisOptions(redisOpts),
+	)
+	if err != nil {
+		fmt.Println("Error initializing queue:", err)
+		return
+	}
+
+	// Define the worker process function
+	workerProcess := func(ctx context.Context, job *types.Job) (interface{}, error) {
+		fmt.Printf("Processing job: %s\n", job.Id)
+		fmt.Printf("Data: %v\n", job.Data)
+
+		if job.RepeatJobKey != "" {
+			fmt.Printf("Repeat job key: %s\n", job.RepeatJobKey)
+		}
+
+		// time.Sleep(5 * time.Second)
+		// return nil, errors.New("job failed")
 		return nil, nil
 	}
 
-	queueName = "test"
-	q, _ = gobullmq.NewQueue(context.Background(), queueName, gobullmq.QueueOption{
-		RedisIp:     "127.0.0.1:6379",
-		RedisPasswd: "",
-	})
-	qWorker, err = gobullmq.NewWorker(context.Background(), queueName, gobullmq.WorkerOptions{
+	// Initialize the worker
+	worker, err := gobullmq.NewWorker(ctx, queueName, gobullmq.WorkerOptions{
 		Concurrency:     1,
 		StalledInterval: 30000,
-	}, redis.NewClient(&redis.Options{
-		Addr:     "127.0.0.1:6379",
-		Password: "",
-	}), qWorkerProcess)
+	}, redis.NewClient(redisOpts), workerProcess)
 	if err != nil {
-		fmt.Println(err)
+		fmt.Println("Error initializing worker:", err)
 		return
 	}
-	qEvents, err = gobullmq.NewQueueEvents(context.Background(), queueName, gobullmq.QueueEventsOptions{
-		RedisClient: *redis.NewClient(&redis.Options{
-			Addr:     "127.0.0.1:6379",
-			Password: "",
-			DB:       0,
+
+	// Initialize queue events
+	events, err := gobullmq.NewQueueEvents(ctx, queueName, gobullmq.QueueEventsOptions{
+		RedisClient: *redis.NewClient(redisOpts),
+		Autorun:     true,
+	})
+	if err != nil {
+		fmt.Println("Error initializing queue events:", err)
+		return
+	}
+
+	// Set up event listeners
+	events.On("completed", func(args ...interface{}) {
+		fmt.Println("Job completed:", args)
+	})
+	events.On("active", func(args ...interface{}) {
+		fmt.Println("Job active:", args)
+	})
+	events.On("added", func(args ...interface{}) {
+		fmt.Println("Job added:", args)
+	})
+	events.On("error", func(args ...interface{}) {
+		fmt.Println("Error event:", args)
+	})
+
+	// Create job data struct
+	jobPayload := struct {
+		TaskID  int    `json:"taskId"`
+		Message string `json:"message"`
+	}{
+		Message: "Processing job",
+	}
+
+	// Add jobs to the queue using the new Add signature
+	for i := 0; i < 10; i++ { // Reduced loop count for quicker testing
+		jobPayload.TaskID = i                               // Modify payload for each job
+		if _, err := queue.Add(ctx, "testJob", jobPayload); // Pass context and payload struct
+		// Example functional options:
+		// gobullmq.AddWithDelay(1000*i), // Delay each job slightly differently
+		// gobullmq.AddWithPriority(i%3),
+		err != nil {
+			fmt.Printf("Error adding job %d: %v\n", i, err)
+		}
+	}
+
+	// Example of adding a repeatable job:
+	_, err = queue.Add(ctx, "repeatableTest", jobPayload,
+		gobullmq.AddWithRepeat(types.JobRepeatOptions{
+			Every: 5000, // Repeat every second
 		}),
-		Autorun: true,
-	})
+	)
 	if err != nil {
-		fmt.Println(err)
-		return
+		fmt.Println("Error adding repeatable job:", err)
 	}
 
-	qEvents.On("added", func(args ...interface{}) {
-		fmt.Println("Added event")
-		fmt.Println(args)
+	worker.On("error", func(args ...interface{}) {
+		fmt.Println("Worker error:", args)
 	})
 
-	qEvents.On("error", func(args ...interface{}) {
-		fmt.Println("Error event")
-		fmt.Println(args)
-	})
-
-	jobdata, err := json.Marshal(
-		struct {
-			Foo string `json:"foo"`
-		}{
-			Foo: "bar",
-		})
-	if err != nil {
-		fmt.Println(err)
-		return
+	// Run the worker
+	if err := worker.Run(); err != nil {
+		fmt.Println("Error running worker:", err)
 	}
 
-	_, err = q.Add("test", jobdata)
-	if err != nil {
-		println(err.Error())
-	}
+	worker.Wait()
 
-	//err = q.Remove(j.Id, true)
-	//if err != nil {
-	//	println(err.Error())
-	//}
-
-	_, err = q.Add("test", jobdata)
-	if err != nil {
-		println(err.Error())
-	}
-
-	_, err = q.Add("test", jobdata, gobullmq.QueueWithRepeat(types.JobRepeatOptions{
-		Every: 1000,
-	}))
-	if err != nil {
-		println(err.Error())
-	}
-
-	err = qWorker.Run()
-	if err != nil {
-		fmt.Printf("error running worker: %v\n", err)
-	}
-	qWorker.Wait()
-
-	qWorker.Close()
-	qEvents.Close()
+	// Clean up
+	worker.Close()
+	events.Close()
 }
