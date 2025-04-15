@@ -49,8 +49,9 @@ type JobOptions struct {
 	Repeat *JobRepeatOptions `json:"repeat,omitempty" msgpack:"repeat,omitempty"`
 
 	// Added fields
-	FailParentOnFailure bool        `json:"failParentOnFailure,omitempty" msgpack:"failParentOnFailure,omitempty"`
-	Parent              *ParentOpts `json:"parent,omitempty" msgpack:"parent,omitempty"`
+	FailParentOnFailure       bool        `json:"failParentOnFailure,omitempty" msgpack:"failParentOnFailure,omitempty"`
+	Parent                    *ParentOpts `json:"parent,omitempty" msgpack:"parent,omitempty"`
+	RemoveDependencyOnFailure bool        `json:"removeDependencyOnFailure,omitempty" msgpack:"removeDependencyOnFailure,omitempty"`
 }
 
 // JobRepeatOptions defines options for configuring repeatable jobs.
@@ -79,6 +80,7 @@ type Job struct {
 	Data           JobData
 	Opts           JobOptions
 	OptsByJson     []byte
+	ParentKey      string
 	TimeStamp      int64
 	Progress       int
 	Delay          int

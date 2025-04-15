@@ -91,9 +91,10 @@ func (s *scripts) moveToFinishedArgs(job *types.Job, value string, propValue str
 		"lockDuration":   30000, // TODO: Get from worker options?
 		"attempts":       job.Opts.Attempts,
 		"attemptsMade":   job.AttemptsMade,
-		"maxMetricsSize": "",                           // TODO: Get from metrics options?
-		"fpof":           job.Opts.FailParentOnFailure, // Use value from job options
-		"rdof":           false,                        // TODO: Implement removeDependencyOnFailure option if needed
+		"maxMetricsSize": "",                                 // TODO: Get from metrics options?
+		"fpof":           job.Opts.FailParentOnFailure,       // Use value from job options
+		"rdof":           job.Opts.RemoveDependencyOnFailure, // Use value from job options
+		"parentKey":      job.ParentKey,                      // Pass parent key
 	}
 
 	// Pack options using msgpack

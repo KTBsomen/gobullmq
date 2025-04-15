@@ -106,6 +106,10 @@ func JobFromJson(jobData map[string]interface{}) (types.Job, error) {
 		job.FailedReason = frStr
 	}
 	job.AttemptsMade = parseStrToInt("attemptsMade")
+	// Parse parentKey
+	if pkStr, ok := jobData["parentKey"].(string); ok {
+		job.ParentKey = pkStr
+	}
 
 	// Handle return value (might already be interface{}, or json string)
 	if retVal, ok := jobData["returnvalue"]; ok {

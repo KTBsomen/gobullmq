@@ -102,3 +102,10 @@ func AddWithParent(parentOpts types.ParentOpts) AddOption {
 		o.Parent = &parentOpts
 	}
 }
+
+// AddWithRemoveDependencyOnFailure marks the job's dependency to be removed from its parent even if this job fails.
+func AddWithRemoveDependencyOnFailure(remove bool) AddOption {
+	return func(o *types.JobOptions) {
+		o.RemoveDependencyOnFailure = remove
+	}
+}
