@@ -25,9 +25,6 @@ import (
 // TODO: Add metric tracking, allowing for storing of time per job, and other metrics
 // Including speed, throughput, largest/smallest job time, average rate of completion or failure, etc
 
-// TODO: At some point, expose a API to the processFn to allow it to extend the lock for a job
-// And perform other tasks, without having to call the worker, or redis directly
-
 // WorkerProcessWithAPI exposes helper methods to the processor
 type WorkerProcessAPI interface {
 	ExtendLock(ctx context.Context, job *types.Job) error
