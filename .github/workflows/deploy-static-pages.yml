@@ -39,7 +39,8 @@ jobs:
         working-directory: docs
         run: bun install --frozen-lockfile
       - name: Install Playwright browsers
-        uses: microsoft/playwright-github-action@v1
+        working-directory: docs
+        run: bunx playwright install --with-deps
       - name: Build Vocs site (bun)
         working-directory: docs
         run: bun run build
