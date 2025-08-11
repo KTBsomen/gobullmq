@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 	"go.codycody31.dev/gobullmq"
 	"go.codycody31.dev/gobullmq/types"
 )
