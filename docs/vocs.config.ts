@@ -2,6 +2,7 @@ import { defineConfig } from "vocs";
 
 export default defineConfig({
   rootDir: "./src",
+  basePath: "/gobullmq",
   title: "BullMQ for Golang",
   description:
     "A Golang port of BullMQ, a Node.js library for handling distributed jobs and messages in Node.js applications with Redis.",
