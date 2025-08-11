@@ -32,8 +32,8 @@ func main() {
 		return
 	}
 
-	// Define the worker process function
-	workerProcess := func(ctx context.Context, job *types.Job) (interface{}, error) {
+	// Define the worker process function (V2 with API)
+	workerProcess := func(ctx context.Context, job *types.Job, api gobullmq.WorkerProcessAPI) (interface{}, error) {
 		fmt.Printf("Processing job: %s\n", job.Id)
 		fmt.Printf("Data: %v\n", job.Data)
 
@@ -41,20 +41,24 @@ func main() {
 			fmt.Printf("Repeat job key: %s\n", job.RepeatJobKey)
 		}
 
+		// Update progress example
+		_ = api.UpdateProgress(ctx, job.Id, 10)
+		// Extend lock example
+		_ = api.ExtendLock(ctx, job)
+
 		r, _ := rand.Int(rand.Reader, big.NewInt(100))
 		if r.Int64() < 50 {
 			return nil, errors.New("job failed")
 		}
 
-		// time.Sleep(5 * time.Second)
-		// return nil, errors.New("job failed")
-		return nil, nil
+		return "ok", nil
 	}
 
-	// Initialize the worker
+	// Initialize the worker (now requires V2 processor)
 	worker, err := gobullmq.NewWorker(ctx, queueName, gobullmq.WorkerOptions{
 		Concurrency:     1,
 		StalledInterval: 30000,
+		Backoff:         &gobullmq.BackoffOptions{Type: "exponential", Delay: 500},
 	}, redis.NewClient(redisOpts), workerProcess)
 	if err != nil {
 		fmt.Println("Error initializing worker:", err)

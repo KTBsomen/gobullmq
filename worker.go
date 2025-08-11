@@ -28,8 +28,15 @@ import (
 // TODO: At some point, expose a API to the processFn to allow it to extend the lock for a job
 // And perform other tasks, without having to call the worker, or redis directly
 
-// WorkerProcessFunc processFn is the function that processes the job
-type WorkerProcessFunc func(ctx context.Context, job *types.Job) (interface{}, error)
+// WorkerProcessWithAPI exposes helper methods to the processor
+type WorkerProcessAPI interface {
+	ExtendLock(ctx context.Context, job *types.Job) error
+	UpdateProgress(ctx context.Context, jobId string, progress interface{}) error
+	UpdateData(ctx context.Context, jobId string, data interface{}) error
+}
+
+// WorkerProcessFuncV2 receives an API alongside the job
+type WorkerProcessFunc func(ctx context.Context, job *types.Job, api WorkerProcessAPI) (interface{}, error)
 
 type Worker struct {
 	Name         string    // Name of the queue
@@ -113,6 +120,41 @@ type jobsInProgress struct {
 type jobInProgress struct {
 	job types.Job
 	ts  time.Time
+}
+
+// workerProcessAPI implements WorkerProcessAPI
+type workerProcessAPI struct {
+	w *Worker
+}
+
+func (api *workerProcessAPI) ExtendLock(ctx context.Context, job *types.Job) error {
+	if api.w == nil {
+		return fmt.Errorf("worker not initialized")
+	}
+	keys := []string{
+		api.w.KeyPrefix + "lock",
+		api.w.KeyPrefix + "stalled",
+	}
+	if job == nil {
+		return fmt.Errorf("job is nil")
+	}
+	// Use the job's lock token
+	_, err := lua.ExtendLock(api.w.redisClient, keys, job.Token, api.w.opts.LockDuration, job.Id)
+	return err
+}
+
+func (api *workerProcessAPI) UpdateProgress(ctx context.Context, jobId string, progress interface{}) error {
+	if api.w == nil || api.w.scripts == nil {
+		return fmt.Errorf("worker/scripts not initialized")
+	}
+	return api.w.scripts.updateProgress(jobId, progress)
+}
+
+func (api *workerProcessAPI) UpdateData(ctx context.Context, jobId string, data interface{}) error {
+	if api.w == nil || api.w.scripts == nil {
+		return fmt.Errorf("worker/scripts not initialized")
+	}
+	return api.w.scripts.updateData(jobId, data)
 }
 
 // NextJobData represents the structured data returned by raw2NextJobData
@@ -627,7 +669,8 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 			}
 		}()
 
-		result, err = w.processFn(w.ctx, &job)
+		api := &workerProcessAPI{w: w}
+		result, err = w.processFn(w.ctx, &job, api)
 	}()
 
 	// Remove job from jobsInProgress

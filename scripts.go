@@ -220,3 +220,28 @@ func (s *scripts) updateProgress(jobId string, progress interface{}) error {
 
 	return nil
 }
+
+// updateData updates the job's data field atomically in Redis
+func (s *scripts) updateData(jobId string, data interface{}) error {
+	keys := []string{
+		s.keyPrefix + jobId,
+	}
+
+	dataJson, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+
+	result, err := lua.UpdateData(s.redisClient, keys, string(dataJson))
+	if err != nil {
+		return err
+	}
+	resultInt64, ok := result.(int64)
+	if !ok {
+		return fmt.Errorf("invalid result type: %T", result)
+	}
+	if resultInt64 == -1 {
+		return fmt.Errorf("job not found")
+	}
+	return nil
+}
