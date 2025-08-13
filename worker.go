@@ -698,7 +698,15 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 	if err != nil {
 		fmt.Println("Error processing job:", err)
 		if err.Error() == RateLimitError {
-			//this.limitUntil = await this.moveLimitedBackToWait(job, token);
+			// Move job back from active to wait and set limitUntil based on limiter TTL
+			if w.scripts != nil {
+				pttl, mErr := w.scripts.moveJobFromActiveToWait(job.Id, token)
+				if mErr != nil {
+					w.Emit("error", fmt.Sprintf("moveJobFromActiveToWait failed for %s: %v", job.Id, mErr))
+				} else {
+					w.limitUntil = time.Now().Add(time.Duration(pttl) * time.Millisecond).UnixMilli()
+				}
+			}
 			return types.Job{}, err
 		}
 
@@ -1222,5 +1230,3 @@ func (w *Worker) notifyFailedJobs(jobs []types.Job) {
 		w.Emit("failed", job, errors.New("job stalled more than allowable limit"), "active")
 	}
 }
-
-// TODO: moveLimitedBackToWait

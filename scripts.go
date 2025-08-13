@@ -245,3 +245,40 @@ func (s *scripts) updateData(jobId string, data interface{}) error {
 	}
 	return nil
 }
+
+// moveJobFromActiveToWait moves a job back from Active to Wait when manually rate limited.
+// It returns the remaining TTL (in ms) for the limiter key, clamped to 0 if negative.
+func (s *scripts) moveJobFromActiveToWait(jobId string, token string) (int64, error) {
+	keys := []string{
+		s.keyPrefix + "active",
+		s.keyPrefix + "wait",
+		s.keyPrefix + "stalled",
+		s.keyPrefix + jobId + ":lock",
+		s.keyPrefix + "paused",
+		s.keyPrefix + "meta",
+		s.keyPrefix + "limiter",
+		s.keyPrefix + "prioritized",
+		s.keyPrefix + "events",
+	}
+
+	args := []interface{}{
+		jobId,
+		token,
+		s.keyPrefix + jobId,
+	}
+
+	result, err := lua.MoveJobFromActiveToWait(s.redisClient, keys, args...)
+	if err != nil {
+		return 0, err
+	}
+
+	pttl, ok := result.(int64)
+	if !ok {
+		return 0, fmt.Errorf("invalid result type from MoveJobFromActiveToWait: %T", result)
+	}
+
+	if pttl < 0 {
+		return 0, nil
+	}
+	return pttl, nil
+}
