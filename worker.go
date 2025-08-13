@@ -63,6 +63,9 @@ type Worker struct {
 	drained    bool
 
 	scripts *scripts
+
+	// asyncFifoQueue holds the internal FIFO task queue to manage fetch/process tasks
+	asyncFifoQueue *fifoqueue.FifoQueue[types.Job]
 }
 
 type WorkerOptions struct {
@@ -305,7 +308,8 @@ func (w *Worker) Run() error {
 
 	go w.startLockExtender()
 
-	fifoQueue := fifoqueue.NewFifoQueue[types.Job](w.opts.Concurrency, false) // Use concurrency for queue size
+	// Initialize and store the async FIFO queue on the worker for reuse and coordinated shutdown
+	w.asyncFifoQueue = fifoqueue.NewFifoQueue[types.Job](w.opts.Concurrency, false)
 	tokenPostfix := 0
 
 	// Helper function to add a fetch task
@@ -315,7 +319,7 @@ func (w *Worker) Run() error {
 		}
 		tokenPostfix++
 		token := fmt.Sprintf("%s:%d", w.Token, tokenPostfix)
-		if err := fifoQueue.Add(func() (types.Job, error) {
+		if err := w.asyncFifoQueue.Add(func() (types.Job, error) {
 			j, err := w.retryIfFailed(func() (*types.Job, error) {
 				// Fetch the next job
 				nextJob, err := w.getNextJob(token, GetNextJobOptions{Block: true})
@@ -372,7 +376,7 @@ func (w *Worker) Run() error {
 
 			// Fetch the result of the next completed task (either fetch or process)
 			// Fetch blocks until a task is available or the context is cancelled/queue closed
-			jobResult, taskErr := fifoQueue.Fetch(w.ctx)
+			jobResult, taskErr := w.asyncFifoQueue.Fetch(w.ctx)
 
 			// Check for errors during fetch (e.g., context cancelled, queue closed)
 			if taskErr != nil {
@@ -397,14 +401,14 @@ func (w *Worker) Run() error {
 				token := fetchedJob.Token // Get token associated during fetch
 
 				// Add the process task for the fetched job
-				if err := fifoQueue.Add(func() (types.Job, error) {
+				if err := w.asyncFifoQueue.Add(func() (types.Job, error) {
 					// Directly call processJob. It handles its own errors/results.
 					_, processErr := w.processJob(
 						fetchedJob, // Pass the actual fetched job struct
 						token,
 						func() bool {
 							// Check concurrency for *fetching* the next job *after* this one
-							return fifoQueue.NumTotal() < w.opts.Concurrency
+							return w.asyncFifoQueue.NumTotal() < w.opts.Concurrency
 						},
 					)
 					// processJob emits 'completed' or 'failed'/'error'
@@ -1001,6 +1005,11 @@ func (w *Worker) Close() {
 
 	// Wait for all jobs to finish
 	w.wg.Wait()
+
+	// Ensure the async FIFO queue is drained and closed
+	if w.asyncFifoQueue != nil {
+		w.asyncFifoQueue.WaitAll()
+	}
 }
 
 // startStalledCheckTimer starts the stalled check timer
@@ -1059,22 +1068,21 @@ func (w *Worker) startLockExtender() {
 	})
 }
 
-// TODO: whenCurrentJobsFinished
-func (w *Worker) whenCurrentJobsFinished(reconnect bool) {
-	////
-	//// Force reconnection of blocking connection to abort blocking redis call immediately.
-	////
-	//if (this.waiting) {
-	//	await this.blockingConnection.disconnect();
-	//} else {
-	//	reconnect = false;
-	//}
-	//
-	//if (this.asyncFifoQueue) {
-	//	await this.asyncFifoQueue.waitAll();
-	//}
-	//
-	//reconnect && (await this.blockingConnection.reconnect());
+// whenCurrentJobsFinished waits until all current jobs are finished
+func (w *Worker) whenCurrentJobsFinished() {
+	if w.asyncFifoQueue != nil {
+		w.asyncFifoQueue.WaitAll()
+		return
+	}
+	for {
+		w.jobsInProgress.Lock()
+		remaining := len(w.jobsInProgress.jobs)
+		w.jobsInProgress.Unlock()
+		if remaining == 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // retryIfFailed retries a job if it failed
