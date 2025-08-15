@@ -27,7 +27,7 @@ import (
 
 // WorkerProcessWithAPI exposes helper methods to the processor
 type WorkerProcessAPI interface {
-	ExtendLock(ctx context.Context, until time.Time) error
+	ExtendLock(ctx context.Context, until time.Duration) error
 	UpdateProgress(ctx context.Context, progress interface{}) error
 	UpdateData(ctx context.Context, data interface{}) error
 }
@@ -127,7 +127,7 @@ type workerProcessAPI struct {
 	job types.Job
 }
 
-func (api *workerProcessAPI) ExtendLock(ctx context.Context, until time.Time) error {
+func (api *workerProcessAPI) ExtendLock(ctx context.Context, until time.Duration) error {
 	if api.w == nil {
 		return fmt.Errorf("worker not initialized")
 	}
@@ -136,7 +136,7 @@ func (api *workerProcessAPI) ExtendLock(ctx context.Context, until time.Time) er
 		api.w.KeyPrefix + "stalled",
 	}
 	// Use the job's lock token
-	_, err := lua.ExtendLock(api.w.redisClient, keys, api.w.Token, until.UnixMilli(), api.job.Id)
+	_, err := lua.ExtendLock(api.w.redisClient, keys, api.w.Token, until.Milliseconds(), api.job.Id)
 	return err
 }
 

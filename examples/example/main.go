@@ -48,7 +48,7 @@ func main() {
 		// Update progress example
 		_ = api.UpdateProgress(ctx, 10)
 		// Extend lock example
-		_ = api.ExtendLock(ctx, time.Now().Add(10*time.Second))
+		_ = api.ExtendLock(ctx, 10*time.Second)
 
 		r, _ := rand.Int(rand.Reader, big.NewInt(100))
 		if r.Int64() < 50 {
