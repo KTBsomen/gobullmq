@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 	"go.codycody31.dev/gobullmq"
@@ -45,9 +46,9 @@ func main() {
 		}
 
 		// Update progress example
-		_ = api.UpdateProgress(ctx, job.Id, 10)
+		_ = api.UpdateProgress(ctx, 10)
 		// Extend lock example
-		_ = api.ExtendLock(ctx, job)
+		_ = api.ExtendLock(ctx, time.Now().Add(10*time.Second))
 
 		r, _ := rand.Int(rand.Reader, big.NewInt(100))
 		if r.Int64() < 50 {

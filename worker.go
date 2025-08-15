@@ -27,9 +27,9 @@ import (
 
 // WorkerProcessWithAPI exposes helper methods to the processor
 type WorkerProcessAPI interface {
-	ExtendLock(ctx context.Context, job *types.Job) error
-	UpdateProgress(ctx context.Context, jobId string, progress interface{}) error
-	UpdateData(ctx context.Context, jobId string, data interface{}) error
+	ExtendLock(ctx context.Context, until time.Time) error
+	UpdateProgress(ctx context.Context, progress interface{}) error
+	UpdateData(ctx context.Context, data interface{}) error
 }
 
 // WorkerProcessFuncV2 receives an API alongside the job
@@ -123,10 +123,11 @@ type jobInProgress struct {
 
 // workerProcessAPI implements WorkerProcessAPI
 type workerProcessAPI struct {
-	w *Worker
+	w   *Worker
+	job types.Job
 }
 
-func (api *workerProcessAPI) ExtendLock(ctx context.Context, job *types.Job) error {
+func (api *workerProcessAPI) ExtendLock(ctx context.Context, until time.Time) error {
 	if api.w == nil {
 		return fmt.Errorf("worker not initialized")
 	}
@@ -134,26 +135,23 @@ func (api *workerProcessAPI) ExtendLock(ctx context.Context, job *types.Job) err
 		api.w.KeyPrefix + "lock",
 		api.w.KeyPrefix + "stalled",
 	}
-	if job == nil {
-		return fmt.Errorf("job is nil")
-	}
 	// Use the job's lock token
-	_, err := lua.ExtendLock(api.w.redisClient, keys, job.Token, api.w.opts.LockDuration, job.Id)
+	_, err := lua.ExtendLock(api.w.redisClient, keys, api.w.Token, until.UnixMilli(), api.job.Id)
 	return err
 }
 
-func (api *workerProcessAPI) UpdateProgress(ctx context.Context, jobId string, progress interface{}) error {
+func (api *workerProcessAPI) UpdateProgress(ctx context.Context, progress interface{}) error {
 	if api.w == nil || api.w.scripts == nil {
 		return fmt.Errorf("worker/scripts not initialized")
 	}
-	return api.w.scripts.updateProgress(jobId, progress)
+	return api.w.scripts.updateProgress(api.job.Id, progress)
 }
 
-func (api *workerProcessAPI) UpdateData(ctx context.Context, jobId string, data interface{}) error {
+func (api *workerProcessAPI) UpdateData(ctx context.Context, data interface{}) error {
 	if api.w == nil || api.w.scripts == nil {
 		return fmt.Errorf("worker/scripts not initialized")
 	}
-	return api.w.scripts.updateData(jobId, data)
+	return api.w.scripts.updateData(api.job.Id, data)
 }
 
 // NextJobData represents the structured data returned by raw2NextJobData
