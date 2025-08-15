@@ -29,7 +29,6 @@ import (
 type WorkerProcessAPI interface {
 	ExtendLock(ctx context.Context, until time.Duration) error
 	UpdateProgress(ctx context.Context, progress interface{}) error
-	UpdateData(ctx context.Context, data interface{}) error
 }
 
 // WorkerProcessFuncV2 receives an API alongside the job
@@ -145,13 +144,6 @@ func (api *workerProcessAPI) UpdateProgress(ctx context.Context, progress interf
 		return fmt.Errorf("worker/scripts not initialized")
 	}
 	return api.w.scripts.updateProgress(api.job.Id, progress)
-}
-
-func (api *workerProcessAPI) UpdateData(ctx context.Context, data interface{}) error {
-	if api.w == nil || api.w.scripts == nil {
-		return fmt.Errorf("worker/scripts not initialized")
-	}
-	return api.w.scripts.updateData(api.job.Id, data)
 }
 
 // NextJobData represents the structured data returned by raw2NextJobData
@@ -679,17 +671,21 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 	var result interface{}
 	var err error
 
+	proccessFnCtx, proccessFnCtxCancel := context.WithCancel(w.ctx)
+
 	// Wrap processFn call with recover to handle panics
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
+				proccessFnCtxCancel()
 				w.Emit("error", fmt.Sprintf("Panic recovered for job %s with token %s: %v", job.Id, token, r))
 				err = fmt.Errorf("panic: %v", r)
 			}
 		}()
 
-		api := &workerProcessAPI{w: w}
-		result, err = w.processFn(w.ctx, &job, api)
+		api := &workerProcessAPI{w: w, job: job}
+		result, err = w.processFn(proccessFnCtx, &job, api)
+		proccessFnCtxCancel()
 	}()
 
 	// Remove job from jobsInProgress
