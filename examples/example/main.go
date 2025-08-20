@@ -8,9 +8,9 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/ktbsomen/gobullmq"
+	"github.com/ktbsomen/gobullmq/types"
 	"github.com/redis/go-redis/v9"
-	"go.codycody31.dev/gobullmq"
-	"go.codycody31.dev/gobullmq/types"
 )
 
 func main() {

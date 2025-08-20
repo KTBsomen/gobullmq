@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ktbsomen/gobullmq/internal/lua"
+	"github.com/ktbsomen/gobullmq/types"
 	"github.com/redis/go-redis/v9"
-	"go.codycody31.dev/gobullmq/internal/lua"
-	"go.codycody31.dev/gobullmq/types"
 )
 
 const (

@@ -8,16 +8,16 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/ktbsomen/gobullmq/internal/utils"
+	"github.com/ktbsomen/gobullmq/internal/utils/repeat"
+	"github.com/ktbsomen/gobullmq/types"
 	"github.com/redis/go-redis/v9"
 	cr "github.com/robfig/cron/v3"
 	"github.com/vmihailenco/msgpack/v5"
-	"go.codycody31.dev/gobullmq/internal/utils"
-	"go.codycody31.dev/gobullmq/internal/utils/repeat"
-	"go.codycody31.dev/gobullmq/types"
 
-	eventemitter "go.codycody31.dev/gobullmq/internal/eventEmitter"
-	"go.codycody31.dev/gobullmq/internal/lua"
-	"go.codycody31.dev/gobullmq/internal/redisAction"
+	eventemitter "github.com/ktbsomen/gobullmq/internal/eventEmitter"
+	"github.com/ktbsomen/gobullmq/internal/lua"
+	"github.com/ktbsomen/gobullmq/internal/redisAction"
 )
 
 // QueueIface defines the interface for a job queue with various operations.

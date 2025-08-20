@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	eventemitter "github.com/ktbsomen/gobullmq/internal/eventEmitter"
 	"github.com/redis/go-redis/v9"
-	eventemitter "go.codycody31.dev/gobullmq/internal/eventEmitter"
 )
 
 // QueueEventsIface is an interface for the QueueEvents struct and defines the methods that can be used to interact with the queue events

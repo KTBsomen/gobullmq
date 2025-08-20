@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/gorhill/cronexpr"
-	"go.codycody31.dev/gobullmq/internal/utils"
-	"go.codycody31.dev/gobullmq/types"
+	"github.com/ktbsomen/gobullmq/internal/utils"
+	"github.com/ktbsomen/gobullmq/types"
 )
 
 // GetJobId returns the job id

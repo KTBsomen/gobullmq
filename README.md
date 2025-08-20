@@ -20,7 +20,7 @@ BullMQ for Golang is a powerful and flexible job queue library that allows you t
 To install BullMQ for Golang, use the following command:
 
 ```bash
-go get go.codycody31.dev/gobullmq
+go get github.com/ktbsomen/gobullmq
 ```
 
 ## Usage
@@ -35,8 +35,8 @@ import (
   "log"
 
   "github.com/redis/go-redis/v9"
-  "go.codycody31.dev/gobullmq"
-  "go.codycody31.dev/gobullmq/types"
+  "github.com/ktbsomen/gobullmq"
+  "github.com/ktbsomen/gobullmq/types"
 )
 
 func main() {

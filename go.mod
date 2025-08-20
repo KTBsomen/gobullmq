@@ -1,4 +1,4 @@
-module go.codycody31.dev/gobullmq
+module github.com/ktbsomen/gobullmq
 
 go 1.19
 

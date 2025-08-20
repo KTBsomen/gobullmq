@@ -1,7 +1,7 @@
 package gobullmq
 
 import (
-	"go.codycody31.dev/gobullmq/types"
+	"github.com/ktbsomen/gobullmq/types"
 )
 
 // AddOption defines the functional option type for Queue.Add
