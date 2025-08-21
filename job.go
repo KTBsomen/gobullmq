@@ -42,7 +42,7 @@ func JobFromId(ctx context.Context, client redis.Cmdable, queueKey string, jobId
 
 func JobFromJson(jobData map[string]interface{}) (types.Job, error) {
 	// Get raw strings/values, handle missing keys and type assertions gracefully
-	dataVal, _ := jobData["data"]               // Data might be nil or string initially
+	dataVal, _ := jobData["data"]                // Data might be nil or string initially
 	optsStr, optsOk := jobData["opts"].(string) // Opts should be a JSON string
 	nameStr, _ := jobData["name"].(string)
 	idStr, _ := jobData["id"].(string)
@@ -156,6 +156,17 @@ var jobOptsDecodeMap = map[string]string{
 }
 
 func JobOptsFromJson(rawOpts string) (types.JobOptions, error) {
+	var jobOpts types.JobOptions
+	if err := json.Unmarshal([]byte(rawOpts), &jobOpts); err != nil {
+		return jobOpts, fmt.Errorf("failed to unmarshal job opts: %w", err)
+	}
+	return jobOpts, nil
+}
+
+// we don't need this as it can be directly unmarshaled with _JobOptsFromJson
+// but for type safety we can still use this.
+
+func _JobOptsFromJson(rawOpts string) (types.JobOptions, error) {
 	var tempMap map[string]interface{}
 	var jobOpts types.JobOptions
 
@@ -216,13 +227,17 @@ func JobOptsFromJson(rawOpts string) (types.JobOptions, error) {
 		return nil
 	}
 
+	// var removeOnCompleteOpt types.KeepJobs
+	// if err := parseNested("removeOnComplete", &removeOnCompleteOpt); err == nil && (removeOnCompleteOpt.Age != 0 || removeOnCompleteOpt.Count != 0) {
+	// 	jobOpts.RemoveOnComplete = &removeOnCompleteOpt
+	// }
 	var removeOnCompleteOpt types.KeepJobs
-	if err := parseNested("removeOnComplete", &removeOnCompleteOpt); err == nil && (removeOnCompleteOpt.Age != 0 || removeOnCompleteOpt.Count != 0) {
+	if err := parseNested("removeOnComplete", &removeOnCompleteOpt); err == nil {
 		jobOpts.RemoveOnComplete = &removeOnCompleteOpt
 	}
 
 	var removeOnFailOpt types.KeepJobs
-	if err := parseNested("removeOnFail", &removeOnFailOpt); err == nil && (removeOnFailOpt.Age != 0 || removeOnFailOpt.Count != 0) {
+	if err := parseNested("removeOnFail", &removeOnFailOpt); err == nil {
 		jobOpts.RemoveOnFail = &removeOnFailOpt
 	}
 
@@ -306,7 +321,7 @@ func setOpts(opts types.JobOptions) types.JobOptions {
 	op.Delay = opts.Delay
 
 	if opts.TimeStamp == 0 {
-		op.TimeStamp = time.Now().UnixMilli()
+		op.TimeStamp = time.Now().Unix()
 	} else {
 		op.TimeStamp = opts.TimeStamp
 	}

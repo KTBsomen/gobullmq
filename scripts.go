@@ -39,7 +39,7 @@ func (s *scripts) getKeepJobs(shouldRemove interface{}, workerKeepJobs *types.Ke
 		if workerKeepJobs != nil {
 			return *workerKeepJobs
 		}
-		return types.KeepJobs{Count: -1} // Keep all jobs by default
+		return types.KeepJobs{Count: -1} // keep all
 	}
 
 	// Handle different types of shouldRemove
@@ -54,11 +54,11 @@ func (s *scripts) getKeepJobs(shouldRemove interface{}, workerKeepJobs *types.Ke
 		}
 		return types.KeepJobs{Count: -1} // Keep all
 	default:
-		return types.KeepJobs{Count: -1} // Default to keep all
+		return types.KeepJobs{Count: -1} // Keep all
 	}
 }
 
-func (s *scripts) moveToFinishedArgs(job *types.Job, value string, propValue string, shouldRemove types.KeepJobs, target string, token string, timestamp time.Time, fetchNext bool) ([]string, []interface{}, error) {
+func (s *scripts) moveToFinishedArgs(job *types.Job, value string, propValue string, shouldRemove interface{}, target string, token string, timestamp time.Time, fetchNext bool) ([]string, []interface{}, error) {
 	// Build the keys array - equivalent to moveToFinishedKeys in JS
 	keys := []string{
 		s.keyPrefix + "wait",
@@ -84,11 +84,27 @@ func (s *scripts) moveToFinishedArgs(job *types.Job, value string, propValue str
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to marshal event data: %v", err)
 	}
+	var workerKeepJobs *types.KeepJobs // or the appropriate type
+	if target == "completed" {
+		workerKeepJobs = job.Opts.RemoveOnComplete
+	} else {
+		workerKeepJobs = job.Opts.RemoveOnFail
+	}
+	var keepJobs = s.getKeepJobs(shouldRemove, workerKeepJobs)
+	var payload map[string]interface{}
+	payload = map[string]interface{}{
+		"age":   keepJobs.Age,
+		"count": keepJobs.Count,
+	}
+	if keepJobs.Age == 0 {
+		payload = map[string]interface{}{
+			"count": keepJobs.Count,
+		}
+	}
 
-	// Prepare options map similar to JS implementation
 	opts := map[string]interface{}{
 		"token":          token,
-		"keepJobs":       shouldRemove,
+		"keepJobs":       payload,
 		"lockDuration":   30000, // TODO: Get from worker options?
 		"attempts":       job.Opts.Attempts,
 		"attemptsMade":   job.AttemptsMade,
@@ -97,7 +113,6 @@ func (s *scripts) moveToFinishedArgs(job *types.Job, value string, propValue str
 		"rdof":           job.Opts.RemoveDependencyOnFailure, // Use value from job options
 		"parentKey":      job.ParentKey,                      // Pass parent key
 	}
-
 	// Pack options using msgpack
 	packedOpts, err := msgpack.Marshal(opts)
 	if err != nil {
@@ -107,7 +122,7 @@ func (s *scripts) moveToFinishedArgs(job *types.Job, value string, propValue str
 	// Build the args array
 	args := []interface{}{
 		job.Id,
-		timestamp.Unix(),
+		timestamp.UnixMilli(),
 		propValue,
 		value,
 		target,
