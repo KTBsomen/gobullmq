@@ -8,12 +8,49 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// UnmarshalJSON always normalizes into KeepJobs
+// Custom unmarshal to normalize bool, int, or object into KeepJobs
+func (k *KeepJobs) UnmarshalJSON(b []byte) error {
+	// Try bool
+	var boolVal bool
+	if err := json.Unmarshal(b, &boolVal); err == nil {
+		if boolVal {
+			k.Count = 0 // remove immediately
+		} else {
+			k.Count = -1 // keep it 
+		}
+		return nil
+	}
+
+	// Try int
+	var intVal int
+	if err := json.Unmarshal(b, &intVal); err == nil {
+		k.Count = intVal
+		return nil
+	}
+
+	// Try full object
+	type alias KeepJobs
+	var tmp alias
+	if err := json.Unmarshal(b, &tmp); err == nil {
+		*k = KeepJobs(tmp)
+		return nil
+	}
+
+	// Default keep it
+	k.Count = -1
+	return nil
+}
+
+
+
 // RedisJobOptions defines options for Redis jobs.
 type RedisJobOptions struct {
 	fpof bool // If true, moves parent to failed.
 	kl   int  // Maximum amount of log entries that will be preserved
 	rdof bool // If true, removes the job from its parent dependencies when it fails after all attempts.
 }
+
 
 // ParentOpts defines options for job parent relationships.
 type ParentOpts struct {
@@ -35,16 +72,16 @@ type JobOptionFunc func(*JobOptions)
 
 // JobOptions defines options for configuring a job.
 type JobOptions struct {
-	Priority         int       `json:"priority,omitempty" msgpack:"priority,omitempty"`
-	RemoveOnComplete *KeepJobs `json:"removeOnComplete,omitempty" msgpack:"removeOnComplete,omitempty"`
-	RemoveOnFail     *KeepJobs `json:"removeOnFail,omitempty" msgpack:"removeOnFail,omitempty"`
-	Attempts         int       `json:"attempts,omitempty" msgpack:"attempts,omitempty"`
-	Delay            int       `json:"delay,omitempty" msgpack:"delay,omitempty"`
-	TimeStamp        int64     `json:"timestamp,omitempty" msgpack:"timestamp,omitempty"`
-	Lifo             bool      `json:"lifo,omitempty" msgpack:"lifo,omitempty"`
-	JobId            string    `json:"jobId,omitempty" msgpack:"jobId,omitempty"`
-	RepeatJobKey     string    `json:"repeatJobKey,omitempty" msgpack:"repeatJobKey,omitempty"`
-	Token            string    `json:"token,omitempty" msgpack:"token,omitempty"` // The token used for locking this job.
+	Priority         int       		`json:"priority,omitempty" msgpack:"priority,omitempty"`
+	RemoveOnComplete *KeepJobs		`json:"removeOnComplete,omitempty" msgpack:"removeOnComplete,omitempty"`
+	RemoveOnFail     *KeepJobs		`json:"removeOnFail,omitempty" msgpack:"removeOnFail,omitempty"`
+	Attempts         int       		`json:"attempts,omitempty" msgpack:"attempts,omitempty"`
+	Delay            int       		`json:"delay,omitempty" msgpack:"delay,omitempty"`
+	TimeStamp        int64     		`json:"timestamp,omitempty" msgpack:"timestamp,omitempty"`
+	Lifo             bool      		`json:"lifo,omitempty" msgpack:"lifo,omitempty"`
+	JobId            string    		`json:"jobId,omitempty" msgpack:"jobId,omitempty"`
+	RepeatJobKey     string    		`json:"repeatJobKey,omitempty" msgpack:"repeatJobKey,omitempty"`
+	Token            string    		`json:"token,omitempty" msgpack:"token,omitempty"` // The token used for locking this job.
 
 	Repeat *JobRepeatOptions `json:"repeat,omitempty" msgpack:"repeat,omitempty"`
 
@@ -103,6 +140,7 @@ func (job *Job) ToJsonData() error {
 	job.OptsByJson = data
 	return err
 }
+
 
 func (j *Job) MoveToCompleted(ctx context.Context, client redis.Cmdable, queueKey string, result interface{}, token string, fetchNext bool) ([]interface{}, error) {
 	j.Returnvalue = result

@@ -794,6 +794,7 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 	}
 
 	// Prepare args for moving job to completed state
+
 	keys, args, err := func(ctx context.Context, client redis.Cmdable, queueKey string, job *types.Job, result interface{}, token string, getNext bool) ([]string, []interface{}, error) {
 		job.Returnvalue = result
 
@@ -802,77 +803,14 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 			return nil, nil, fmt.Errorf("failed to marshal return value: %v", err)
 		}
 
-		stringifiedJsonReturnValueWithJobId, err := json.Marshal(struct {
-			Returnvalue interface{} `json:"returnvalue"`
-			Id          string      `json:"id"`
-		}{
-			Returnvalue: result,
-			Id:          job.Id,
-		})
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to marshal return value with job id: %v", err)
-		}
-
-		// workerKeepJobs := w.opts.RemoveOnComplete
-		// keepJobs := workerKeepJobs
-		metricsKey := fmt.Sprintf("%smetrics:%s", w.KeyPrefix, "completed")
-
-		keys := []string{
-			w.KeyPrefix + "wait",
-			w.KeyPrefix + "active",
-			w.KeyPrefix + "prioritized",
-			w.KeyPrefix + "events",
-			w.KeyPrefix + "stalled",
-			w.KeyPrefix + "limiter",
-			w.KeyPrefix + "delayed",
-			w.KeyPrefix + "paused",
-			w.KeyPrefix + "meta",
-			w.KeyPrefix + "pc",
-			w.KeyPrefix + "completed",
-			w.KeyPrefix + job.Id,
-			metricsKey,
-		}
-
-		// TODO: Some of this data should not be hard coded, kinda defeats the point
-		opts := map[string]interface{}{
-			"token": token,
-			"keepJobs": map[string]interface{}{
-				"Age":   0,
-				"Count": -1,
-			},
-			"lockDuration":   30000,
-			"attempts":       job.Opts.Attempts,
-			"attemptsMade":   job.AttemptsMade,
-			"maxMetricsSize": "",
-			"fpof":           false,
-			"rdof":           false,
-		}
-
-		packedOpts, err := msgpack.Marshal(opts)
-
-		if err != nil {
-			return nil, nil, err
-		}
-
-		args := []interface{}{
-			job.Id,
-			time.Now().Unix(),
-			"returnvalue",
-			stringifiedReturnValue,
-			"completed",
-			stringifiedJsonReturnValueWithJobId,
-			(getNext && !(w.closing || w.paused)),
-			w.KeyPrefix,
-			packedOpts,
-		}
-
-		return keys, args, nil
+		return w.scripts.moveToFinishedArgs(job, string(stringifiedReturnValue), "returnvalue", *job.Opts.RemoveOnComplete, "completed", token, time.Now(), getNext)
 	}(w.ctx, w.redisClient, w.KeyPrefix, &job, result, token, (fetchNextCallback() && !(w.closing || w.paused)))
 	if err != nil {
 		w.Emit("error", fmt.Sprintf("Error moving job to completed: %v", err))
 		return types.Job{}, err
 	}
-
+	//call the lua function
+	job.FinishedOn = time.Now()
 	completed, err := func(id string, keys []string, args []interface{}) ([]interface{}, error) {
 		rawResult, err := lua.MoveToFinished(w.redisClient, keys, args...)
 		if err != nil {
@@ -892,6 +830,7 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 
 		return []interface{}{rawResultSlice}, nil
 	}(job.Id, keys, args)
+
 	if err != nil {
 		w.Emit("error", fmt.Sprintf("Error moving job to completed: %v", err))
 		return types.Job{}, err
