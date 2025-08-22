@@ -12,14 +12,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	eventemitter "github.com/ktbsomen/gobullmq/internal/eventEmitter"
-	"github.com/ktbsomen/gobullmq/internal/fifoqueue"
-	"github.com/ktbsomen/gobullmq/internal/lua"
-	"github.com/ktbsomen/gobullmq/internal/utils"
-	backoffutil "github.com/ktbsomen/gobullmq/internal/utils/backoff"
-	"github.com/ktbsomen/gobullmq/types"
 	"github.com/redis/go-redis/v9"
 	"github.com/vmihailenco/msgpack/v5"
+	eventemitter "go.codycody31.dev/gobullmq/internal/eventEmitter"
+	"go.codycody31.dev/gobullmq/internal/fifoqueue"
+	"go.codycody31.dev/gobullmq/internal/lua"
+	"go.codycody31.dev/gobullmq/internal/utils"
+	backoffutil "go.codycody31.dev/gobullmq/internal/utils/backoff"
+	"go.codycody31.dev/gobullmq/types"
 )
 
 // TODO: Add metric tracking, allowing for storing of time per job, and other metrics

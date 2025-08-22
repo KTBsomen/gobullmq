@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/ktbsomen/gobullmq/internal/lua"
-	"github.com/ktbsomen/gobullmq/types"
 	"github.com/redis/go-redis/v9"
+	"go.codycody31.dev/gobullmq/internal/lua"
+	"go.codycody31.dev/gobullmq/types"
 )
 
 const (
@@ -42,7 +42,7 @@ func JobFromId(ctx context.Context, client redis.Cmdable, queueKey string, jobId
 
 func JobFromJson(jobData map[string]interface{}) (types.Job, error) {
 	// Get raw strings/values, handle missing keys and type assertions gracefully
-	dataVal, _ := jobData["data"]                // Data might be nil or string initially
+	dataVal, _ := jobData["data"]               // Data might be nil or string initially
 	optsStr, optsOk := jobData["opts"].(string) // Opts should be a JSON string
 	nameStr, _ := jobData["name"].(string)
 	idStr, _ := jobData["id"].(string)
@@ -163,8 +163,8 @@ func JobOptsFromJson(rawOpts string) (types.JobOptions, error) {
 	return jobOpts, nil
 }
 
-// we don't need this as it can be directly unmarshaled with _JobOptsFromJson
-// but for type safety we can still use this.
+// we don't need this as it can be directly unmarshaled with JobOptsFromJson
+// but for type safety we can still use this _JobOptsFromJson.
 
 func _JobOptsFromJson(rawOpts string) (types.JobOptions, error) {
 	var tempMap map[string]interface{}
