@@ -803,7 +803,7 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 			return nil, nil, fmt.Errorf("failed to marshal return value: %v", err)
 		}
 
-		return w.scripts.moveToFinishedArgs(job, string(stringifiedReturnValue), "returnvalue", *job.Opts.RemoveOnComplete, "completed", token, time.Now(), getNext)
+		return w.scripts.moveToFinishedArgs(job, string(stringifiedReturnValue), "returnvalue", job.Opts.RemoveOnComplete, "completed", token, time.Now(), getNext)
 	}(w.ctx, w.redisClient, w.KeyPrefix, &job, result, token, (fetchNextCallback() && !(w.closing || w.paused)))
 	if err != nil {
 		w.Emit("error", fmt.Sprintf("Error moving job to completed: %v", err))
