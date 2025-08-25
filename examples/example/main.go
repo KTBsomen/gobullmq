@@ -61,7 +61,7 @@ func main() {
 	// Initialize the worker (now requires V2 processor)
 	worker, err := gobullmq.NewWorker(ctx, queueName, gobullmq.WorkerOptions{
 		Concurrency:     1,
-		StalledInterval: 30000,
+		StalledInterval: 30 * time.Second,
 		Backoff:         &gobullmq.BackoffOptions{Type: "exponential", Delay: 500},
 	}, workerClient, workerProcess)
 	if err != nil {
