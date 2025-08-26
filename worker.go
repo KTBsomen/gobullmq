@@ -74,15 +74,15 @@ type WorkerOptions struct {
 	Metrics          *MetricsOptions
 	Prefix           string
 	MaxStalledCount  int
-	StalledInterval  int
+	StalledInterval  time.Duration
 	RemoveOnComplete *types.KeepJobs
 	RemoveOnFail     *types.KeepJobs
 	SkipStalledCheck bool
 	SkipLockRenewal  bool
-	DrainDelay       int
-	LockDuration     int
-	LockRenewTime    int
-	RunRetryDelay    int
+	DrainDelay       time.Duration
+	LockDuration     time.Duration
+	LockRenewTime    time.Duration
+	RunRetryDelay    time.Duration
 	Backoff          *BackoffOptions
 }
 
@@ -154,8 +154,38 @@ type NextJobData struct {
 	DelayUntil int64                  // Delay time from raw[3]
 }
 
+// Default timing configuration
+const (
+	defaultLockDuration    = 30 * time.Second
+	defaultLockRenewTime   = 15 * time.Second
+	defaultStalledInterval = 30 * time.Second
+	defaultRunRetryDelay   = 250 * time.Millisecond
+	defaultDrainDelay      = 1 * time.Second
+)
+
 // NewWorker creates a new Worker instance
 func NewWorker(ctx context.Context, name string, opts WorkerOptions, connection redis.Cmdable, processor WorkerProcessFunc) (*Worker, error) {
+	// Apply defaults / sanitization before using opts
+	if opts.LockDuration <= 0 {
+		opts.LockDuration = defaultLockDuration
+	}
+	if opts.LockRenewTime <= 0 || opts.LockRenewTime >= opts.LockDuration { // ensure renew < lock
+		opts.LockRenewTime = opts.LockDuration / 2
+	}
+	if opts.StalledInterval <= 0 {
+		opts.StalledInterval = defaultStalledInterval
+	}
+	if opts.Concurrency <= 0 {
+		opts.Concurrency = 1
+	}
+	if opts.RunRetryDelay <= 0 {
+		opts.RunRetryDelay = defaultRunRetryDelay
+	}
+	if opts.DrainDelay < 0 {
+		opts.DrainDelay = defaultDrainDelay
+	}
+	// DrainDelay left as-is (interpreted as seconds in waitForJob) allow zero for minimal blocking.
+
 	// Derive cancellable context for worker lifetime
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -498,8 +528,13 @@ func (w *Worker) moveToActive(token string, jobId string) (*types.Job, error) {
 
 	opts := map[string]interface{}{
 		"token":        token,
-		"lockDuration": 30000,
-		"limiter":      w.opts.Limiter,
+		"lockDuration": int(w.opts.LockDuration / time.Millisecond),
+	}
+	if w.opts.Limiter != nil { // ensure limiter duration encoded in ms if present
+		opts["limiter"] = map[string]interface{}{
+			"max":      w.opts.Limiter.Max,
+			"duration": w.opts.Limiter.Duration, // keep as-is (still int ms if RateLimiterOptions unchanged)
+		}
 	}
 
 	msgPackedOpts, err := msgpack.Marshal(opts)
@@ -581,25 +616,21 @@ func raw2NextJobData(raw []interface{}) *NextJobData {
 
 // waitForJob waits for a job ID from the wait list
 func (w *Worker) waitForJob() (string, error) {
-	blockTimeout := math.Max(float64(w.opts.DrainDelay), 0.01)
-	if w.blockUntil > 0 {
-		blockTimeout = math.Max(float64((w.blockUntil-time.Now().UnixMilli())/1000), 0.01)
+	blockTimeout := w.opts.DrainDelay
+	if blockTimeout <= 0 {
+		blockTimeout = 10 * time.Millisecond
 	}
-
-	// // Only Redis v6.0.0 and above supports doubles as block time
-	// blockTimeout = isRedisVersionLowerThan(
-	//   this.blockingConnection.redisVersion,
-	//   '6.0.0',
-	// )
-	//   ? Math.ceil(blockTimeout)
-	//   : blockTimeout;
-
-	// We restrict the maximum block timeout to 10 second to avoid
-	// blocking the connection for too long in the case of reconnections
-	// reference: https://github.com/taskforcesh/bullmq/issues/1658
-	blockTimeout = math.Min(blockTimeout, 10)
-
-	result, err := w.redisClient.BRPopLPush(w.ctx, w.KeyPrefix+"wait", w.KeyPrefix+"active", time.Duration(blockTimeout)).Result()
+	if w.blockUntil > 0 { // compute remaining delay from blockUntil timestamp (ms)
+		remaining := time.Until(time.UnixMilli(w.blockUntil))
+		if remaining < 10*time.Millisecond {
+			remaining = 10 * time.Millisecond
+		}
+		blockTimeout = remaining
+	}
+	if blockTimeout > 10*time.Second { // cap to 10s
+		blockTimeout = 10 * time.Second
+	}
+	result, err := w.redisClient.BRPopLPush(w.ctx, w.KeyPrefix+"wait", w.KeyPrefix+"active", blockTimeout).Result()
 	if err != nil {
 		return "", err
 	}
@@ -950,12 +981,10 @@ func (w *Worker) startStalledCheckTimer() {
 	if w.closing || w.opts.SkipStalledCheck {
 		return
 	}
-
-	w.stalledCheckTimer = time.AfterFunc(time.Duration(w.opts.StalledInterval), func() {
+	w.stalledCheckTimer = time.AfterFunc(w.opts.StalledInterval, func() {
 		if w.closing || w.opts.SkipStalledCheck {
 			return
 		}
-
 		if err := w.moveStalledJobsToWait(); err != nil {
 			w.Emit("error", err)
 		}
@@ -968,36 +997,32 @@ func (w *Worker) startLockExtender() {
 	if w.closing || w.opts.SkipLockRenewal {
 		return
 	}
-
-	w.extendLocksTimer = time.AfterFunc(time.Duration(w.opts.LockRenewTime/2), func() {
-		// Lock using the mutex associated with jobsInProgress
+	w.extendLocksTimer = time.AfterFunc(w.opts.LockRenewTime/2, func() {
 		w.jobsInProgress.Lock()
 		defer w.jobsInProgress.Unlock()
 		if w.closing || w.opts.SkipLockRenewal {
 			return
 		}
-
 		now := time.Now()
 		var jobsToExtend []*types.Job
-
-		for _, jp := range w.jobsInProgress.jobs {
+		for id, jp := range w.jobsInProgress.jobs {
 			if jp.ts.IsZero() {
 				jp.ts = now
+				w.jobsInProgress.jobs[id] = jp
 				continue
 			}
-
-			if jp.ts.Add(time.Duration(w.opts.LockRenewTime / 2)).Before(now) {
+			if jp.ts.Add(w.opts.LockRenewTime / 2).Before(now) {
 				jp.ts = now
+				w.jobsInProgress.jobs[id] = jp
 				jobsToExtend = append(jobsToExtend, &jp.job)
 			}
 		}
-
 		if len(jobsToExtend) > 0 {
 			if err := w.extendLocksForJobs(jobsToExtend); err != nil {
 				w.Emit("error", err)
 			}
 		}
-		w.startLockExtender() // Restart the timer
+		w.startLockExtender()
 	})
 }
 
@@ -1019,32 +1044,24 @@ func (w *Worker) whenCurrentJobsFinished() {
 }
 
 // retryIfFailed retries a job if it failed
-func (w *Worker) retryIfFailed(jobFunc func() (*types.Job, error), delay int) (types.Job, error) {
+func (w *Worker) retryIfFailed(jobFunc func() (*types.Job, error), delay time.Duration) (types.Job, error) {
 	for {
 		nextJob, err := jobFunc()
 		if err != nil {
 			w.Emit("error", err)
-
-			// Retry only if a delay is specified
 			if delay > 0 {
-				time.Sleep(time.Duration(delay) * time.Millisecond)
+				time.Sleep(delay)
 				continue
 			}
-
 			return types.Job{}, err
 		}
-
-		// If no job is available, retry after the delay
 		if nextJob == nil {
 			if delay > 0 {
-				time.Sleep(time.Duration(delay) * time.Millisecond)
+				time.Sleep(delay)
 				continue
 			}
-
 			return types.Job{}, nil
 		}
-
-		// Successfully retrieved a job
 		return *nextJob, nil
 	}
 }
@@ -1063,19 +1080,13 @@ func (w *Worker) extendLocks() error {
 // extendLocksForJobs extends the locks for the jobs in progress
 func (w *Worker) extendLocksForJobs(jobs []*types.Job) error {
 	for _, job := range jobs {
-		keys := []string{
-			w.KeyPrefix + "lock",
-			w.KeyPrefix + "stalled",
-		}
-
-		_, err := lua.ExtendLock(w.redisClient, keys, job.Token, w.opts.LockDuration, job.Id)
+		keys := []string{w.KeyPrefix + "lock", w.KeyPrefix + "stalled"}
+		_, err := lua.ExtendLock(w.redisClient, keys, job.Token, int(w.opts.LockDuration/time.Millisecond), job.Id)
 		if err != nil {
-			// Log or handle the error if the lock cannot be extended
 			w.Emit("error", fmt.Errorf("could not renew lock for job %s: %w", job.Id, err))
 			return err
 		}
 	}
-
 	return nil
 }
 
@@ -1083,25 +1094,11 @@ func (w *Worker) extendLocksForJobs(jobs []*types.Job) error {
 func (w *Worker) moveStalledJobsToWait() error {
 	chunkSize := 50
 	failed, stalled, err := func() (failed []string, stalled []string, error error) {
-		keys := []string{
-			w.KeyPrefix + "stalled",
-			w.KeyPrefix + "wait",
-			w.KeyPrefix + "active",
-			w.KeyPrefix + "failed",
-			w.KeyPrefix + "stalled-check",
-			w.KeyPrefix + "meta",
-			w.KeyPrefix + "paused",
-			w.KeyPrefix + "events",
-		}
-
-		result, err := lua.MoveStalledJobsToWait(w.redisClient, keys, w.opts.MaxStalledCount,
-			w.KeyPrefix,
-			time.Now().Unix(),
-			w.opts.StalledInterval)
+		keys := []string{w.KeyPrefix + "stalled", w.KeyPrefix + "wait", w.KeyPrefix + "active", w.KeyPrefix + "failed", w.KeyPrefix + "stalled-check", w.KeyPrefix + "meta", w.KeyPrefix + "paused", w.KeyPrefix + "events"}
+		result, err := lua.MoveStalledJobsToWait(w.redisClient, keys, w.opts.MaxStalledCount, w.KeyPrefix, time.Now().Unix(), int(w.opts.StalledInterval/time.Millisecond))
 		if err != nil {
 			return nil, nil, err
 		}
-
 		// Type assert result as []interface{} to access failed and stalled lists
 		resultSlice, ok := result.([]interface{})
 		if !ok || len(resultSlice) != 2 {
