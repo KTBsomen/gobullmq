@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // FifoQueue handles asynchronous FIFO tasks with thread-safe operations using a fixed worker pool.
@@ -126,18 +127,45 @@ func (q *FifoQueue[T]) Fetch(ctx context.Context) (*T, error) {
 	}
 }
 
-// WaitAll waits until all tasks are completed and properly closes the queue.
-func (q *FifoQueue[T]) WaitAll() {
+// WaitAll waits until all tasks are completed (with timeout) and properly closes the queue.
+// The timeout parameter specifies the maximum time to wait for tasks to complete.
+// Returns an error if the timeout is exceeded.
+func (q *FifoQueue[T]) WaitAll(timeout time.Duration) error {
 	q.mu.Lock()
 	if !q.isClosed.Load() {
 		q.isClosed.Store(true)
-		close(q.tasks)   // stop accepting new tasks
-		q.pending.Wait() // wait for in-flight tasks to finish
-		q.cancel()       // now cancel context to unblock any waiting Fetch
+		close(q.tasks) // stop accepting new tasks
+		q.cancel()     // cancel context FIRST to unblock any blocked tasks
+		q.mu.Unlock()
+
+		// Wait for pending tasks with timeout
+		done := make(chan struct{})
+		go func() {
+			q.pending.Wait()
+			close(done)
+		}()
+
+		var timedOut bool
+		select {
+		case <-done:
+			// All tasks completed normally
+		case <-time.After(timeout):
+			// Timeout - force close anyway
+			timedOut = true
+		}
+
+		q.mu.Lock()
 		close(q.queue)
 		close(q.errors)
+		q.mu.Unlock()
+
+		if timedOut {
+			return ErrWaitTimeout
+		}
+		return nil
 	}
 	q.mu.Unlock()
+	return nil
 }
 
 // NumPending returns the number of pending tasks.
@@ -153,3 +181,4 @@ func (q *FifoQueue[T]) NumTotal() int { return q.NumPending() + q.NumQueued() + 
 func (q *FifoQueue[T]) IsClosed() bool { return q.isClosed.Load() }
 
 var ErrQueueClosed = errors.New("queue is closed")
+var ErrWaitTimeout = errors.New("WaitAll timed out waiting for tasks to complete")

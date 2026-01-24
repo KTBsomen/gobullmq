@@ -88,6 +88,7 @@ type WorkerOptions struct {
 	LockRenewTime    time.Duration
 	RunRetryDelay    time.Duration
 	Backoff          *BackoffOptions
+	ShutdownTimeout  time.Duration // Timeout for graceful shutdown (default: 5s)
 }
 
 // type KeepJobs struct { // Moved to types/job.go
@@ -160,11 +161,13 @@ type NextJobData struct {
 
 // Default timing configuration
 const (
-	defaultLockDuration    = 30 * time.Second
-	defaultLockRenewTime   = 15 * time.Second
-	defaultStalledInterval = 30 * time.Second
-	defaultRunRetryDelay   = 250 * time.Millisecond
-	defaultDrainDelay      = 1 * time.Second
+	defaultLockDuration         = 30 * time.Second
+	defaultLockRenewTime        = 15 * time.Second
+	defaultStalledInterval      = 30 * time.Second
+	defaultRunRetryDelay        = 250 * time.Millisecond
+	defaultDrainDelay           = 1 * time.Second
+	defaultShutdownTimeout      = 5 * time.Second
+	minQueueCleanupTimeout      = time.Second
 )
 
 // NewWorker creates a new Worker instance
@@ -190,6 +193,10 @@ func NewWorker(ctx context.Context, name string, opts WorkerOptions, connection 
 	}
 	// DrainDelay left as-is (interpreted as seconds in waitForJob) allow zero for minimal blocking.
 
+	if opts.ShutdownTimeout <= 0 {
+		opts.ShutdownTimeout = defaultShutdownTimeout
+	}
+
 	// Derive cancellable context for worker lifetime
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -212,7 +219,7 @@ func NewWorker(ctx context.Context, name string, opts WorkerOptions, connection 
 		jobsInProgress: &jobsInProgress{
 			jobs: make(map[string]jobInProgress),
 		},
-		pauseCh: make(chan struct{}),
+		pauseCh: make(chan struct{}, 1), // Buffered to ensure signal is not lost
 	}
 	// Atomic fields are zero-valued by default (false for Bool, 0 for Int64)
 
@@ -644,11 +651,28 @@ func (w *Worker) waitForJob() (string, error) {
 	return result, nil
 }
 
-// delay delays the execution for the specified time
+// sleepContext sleeps for the specified duration or until context is cancelled.
+// Returns nil on normal completion, or the context error if cancelled.
+func sleepContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// delay delays the execution for the specified time, respecting context cancellation
 func (w *Worker) delay(until int64) error {
 	now := time.Now().UnixMilli()
 	if until > now {
-		time.Sleep(time.Duration(until-now) * time.Millisecond)
+		return sleepContext(w.ctx, time.Duration(until-now)*time.Millisecond)
 	}
 	return nil
 }
@@ -968,17 +992,19 @@ func (w *Worker) Wait() {
 	w.wg.Wait()
 }
 
-// Close closes the worker
-func (w *Worker) Close() {
+// Close closes the worker gracefully with timeout.
+// Returns an error if shutdown times out.
+func (w *Worker) Close() error {
 	w.mutex.Lock()
-	defer w.mutex.Unlock()
 
 	if w.closing.Load() {
-		return
+		w.mutex.Unlock()
+		return nil
 	}
 
 	w.closing.Store(true)
 
+	// Cancel context FIRST to unblock any sleeping goroutines
 	w.cancel()
 
 	// Stop timers
@@ -989,13 +1015,50 @@ func (w *Worker) Close() {
 		w.extendLocksTimer.Stop()
 	}
 
-	// Wait for all jobs to finish
-	w.wg.Wait()
+	timeout := w.opts.ShutdownTimeout
+	w.mutex.Unlock()
+
+	// Wait for main goroutine with timeout
+	done := make(chan struct{})
+	go func() {
+		w.wg.Wait()
+		close(done)
+	}()
+
+	var timedOut bool
+	select {
+	case <-done:
+		// Graceful shutdown successful
+	case <-time.After(timeout):
+		// Force shutdown after timeout
+		w.Emit("error", fmt.Errorf("worker shutdown timed out after %v", timeout))
+		timedOut = true
+	}
 
 	// Ensure the async FIFO queue is drained and closed
+	var queueErr error
 	if w.asyncFifoQueue != nil {
-		w.asyncFifoQueue.WaitAll()
+		// Use remaining timeout for queue cleanup (at least minQueueCleanupTimeout)
+		queueTimeout := timeout / 2
+		if queueTimeout < minQueueCleanupTimeout {
+			queueTimeout = minQueueCleanupTimeout
+		}
+		if err := w.asyncFifoQueue.WaitAll(queueTimeout); err != nil {
+			queueErr = fmt.Errorf("failed to close FIFO queue: %w", err)
+		}
 	}
+
+	// Combine errors if both timeout and queue error occurred
+	if timedOut && queueErr != nil {
+		return errors.Join(fmt.Errorf("worker shutdown timed out after %v", timeout), queueErr)
+	}
+	if timedOut {
+		return fmt.Errorf("worker shutdown timed out after %v", timeout)
+	}
+	if queueErr != nil {
+		return queueErr
+	}
+	return nil
 }
 
 // startStalledCheckTimer starts the stalled check timer
@@ -1051,7 +1114,8 @@ func (w *Worker) startLockExtender() {
 // whenCurrentJobsFinished waits until all current jobs are finished
 func (w *Worker) whenCurrentJobsFinished() {
 	if w.asyncFifoQueue != nil {
-		w.asyncFifoQueue.WaitAll()
+		// Use shutdown timeout for waiting
+		_ = w.asyncFifoQueue.WaitAll(w.opts.ShutdownTimeout)
 		return
 	}
 	for {
@@ -1061,25 +1125,38 @@ func (w *Worker) whenCurrentJobsFinished() {
 		if remaining == 0 {
 			break
 		}
-		time.Sleep(50 * time.Millisecond)
+		if err := sleepContext(w.ctx, 50*time.Millisecond); err != nil {
+			return // Context cancelled, exit early
+		}
 	}
 }
 
-// retryIfFailed retries a job if it failed
+// retryIfFailed retries a job if it failed, respecting context cancellation
 func (w *Worker) retryIfFailed(jobFunc func() (*types.Job, error), delay time.Duration) (types.Job, error) {
 	for {
+		// Check context before attempting
+		select {
+		case <-w.ctx.Done():
+			return types.Job{}, w.ctx.Err()
+		default:
+		}
+
 		nextJob, err := jobFunc()
 		if err != nil {
 			w.Emit("error", err)
 			if delay > 0 {
-				time.Sleep(delay)
+				if err := sleepContext(w.ctx, delay); err != nil {
+					return types.Job{}, err
+				}
 				continue
 			}
 			return types.Job{}, err
 		}
 		if nextJob == nil {
 			if delay > 0 {
-				time.Sleep(delay)
+				if err := sleepContext(w.ctx, delay); err != nil {
+					return types.Job{}, err
+				}
 				continue
 			}
 			return types.Job{}, nil
