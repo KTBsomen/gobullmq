@@ -425,9 +425,7 @@ func (q *Queue) scheduleNextRepeatableJob(ctx context.Context, name string, json
 		Member: repeatJobKey,
 	}).Result()
 	if err != nil {
-		// Log or handle error adding to repeat set
-		q.Emit("error", fmt.Sprintf("Failed to update repeat set for key %s: %v", repeatJobKey, err))
-		// Continue trying to add the job instance?
+		return fmt.Errorf("failed to update repeat set for key %s: %w", repeatJobKey, err)
 	}
 
 	// Create the job instance with the modified opts (containing delay, instance jobId etc.)

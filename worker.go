@@ -9,6 +9,7 @@ import (
 	"math"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,9 +39,9 @@ type Worker struct {
 	Name        string    // Name of the queue
 	Token       uuid.UUID // Token used to identify the queue events
 	ee          *eventemitter.EventEmitter
-	running     bool               // Flag to indicate if the queue events is running
-	closing     bool               // Flag to indicate if the queue events is closing
-	paused      bool               // Flag to indicate if the queue events is paused
+	running     atomic.Bool // Flag to indicate if the queue events is running
+	closing     atomic.Bool // Flag to indicate if the queue events is closing
+	paused      atomic.Bool // Flag to indicate if the queue events is paused
 	redisClient redis.Cmdable      // Redis client used to interact with the redis server
 	ctx         context.Context    // Context used to handle the queue events
 	cancel      context.CancelFunc // Cancel function used to stop the queue events
@@ -57,14 +58,17 @@ type Worker struct {
 
 	jobsInProgress *jobsInProgress
 
-	blockUntil int64
-	limitUntil int64
-	drained    bool
+	blockUntil atomic.Int64
+	limitUntil atomic.Int64
+	drained    atomic.Bool
 
 	scripts *scripts
 
 	// asyncFifoQueue holds the internal FIFO task queue to manage fetch/process tasks
 	asyncFifoQueue *fifoqueue.FifoQueue[types.Job]
+
+	// pauseCh is used for signaling pause/resume instead of busy-waiting
+	pauseCh chan struct{}
 }
 
 type WorkerOptions struct {
@@ -84,6 +88,7 @@ type WorkerOptions struct {
 	LockRenewTime    time.Duration
 	RunRetryDelay    time.Duration
 	Backoff          *BackoffOptions
+	ShutdownTimeout  time.Duration // Timeout for graceful shutdown (default: 5s)
 }
 
 // type KeepJobs struct { // Moved to types/job.go
@@ -156,11 +161,13 @@ type NextJobData struct {
 
 // Default timing configuration
 const (
-	defaultLockDuration    = 30 * time.Second
-	defaultLockRenewTime   = 15 * time.Second
-	defaultStalledInterval = 30 * time.Second
-	defaultRunRetryDelay   = 250 * time.Millisecond
-	defaultDrainDelay      = 1 * time.Second
+	defaultLockDuration         = 30 * time.Second
+	defaultLockRenewTime        = 15 * time.Second
+	defaultStalledInterval      = 30 * time.Second
+	defaultRunRetryDelay        = 250 * time.Millisecond
+	defaultDrainDelay           = 1 * time.Second
+	defaultShutdownTimeout      = 5 * time.Second
+	minQueueCleanupTimeout      = time.Second
 )
 
 // NewWorker creates a new Worker instance
@@ -186,6 +193,10 @@ func NewWorker(ctx context.Context, name string, opts WorkerOptions, connection 
 	}
 	// DrainDelay left as-is (interpreted as seconds in waitForJob) allow zero for minimal blocking.
 
+	if opts.ShutdownTimeout <= 0 {
+		opts.ShutdownTimeout = defaultShutdownTimeout
+	}
+
 	// Derive cancellable context for worker lifetime
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -200,20 +211,17 @@ func NewWorker(ctx context.Context, name string, opts WorkerOptions, connection 
 		Name:        name,
 		Token:       uuid.New(),
 		ee:          eventemitter.NewEventEmitter(),
-		running:     false,
-		closing:     false,
 		ctx:         ctx,
 		cancel:      cancel,
 		redisClient: connection,
 		opts:        opts,
 		processFn:   processor,
-		blockUntil:  0,
-		limitUntil:  0,
-		drained:     false,
 		jobsInProgress: &jobsInProgress{
 			jobs: make(map[string]jobInProgress),
 		},
+		pauseCh: make(chan struct{}, 1), // Buffered to ensure signal is not lost
 	}
+	// Atomic fields are zero-valued by default (false for Bool, 0 for Int64)
 
 	// Setup key prefix with fallback
 	if opts.Prefix == "" {
@@ -314,13 +322,13 @@ func (w *Worker) Run() error {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 
-	if w.running {
+	if w.running.Load() {
 		return errors.New("worker is already running")
 	}
 
-	w.running = true
+	w.running.Store(true)
 
-	if w.closing {
+	if w.closing.Load() {
 		return errors.New("worker is closing")
 	}
 
@@ -334,7 +342,7 @@ func (w *Worker) Run() error {
 
 	// Helper function to add a fetch task
 	addFetchTask := func() {
-		if w.closing || w.paused {
+		if w.closing.Load() || w.paused.Load() {
 			return
 		}
 		tokenPostfix++
@@ -453,30 +461,36 @@ func (w *Worker) Run() error {
 
 // getNextJob gets the next job
 func (w *Worker) getNextJob(token string, opts GetNextJobOptions) (*types.Job, error) {
-	if w.paused {
+	if w.paused.Load() {
 		if opts.Block {
-			for w.paused && !w.closing {
-				time.Sleep(100 * time.Millisecond)
+			// Wait for resume signal instead of busy-waiting
+			for w.paused.Load() && !w.closing.Load() {
+				select {
+				case <-w.pauseCh:
+					// Signaled, recheck conditions
+				case <-time.After(100 * time.Millisecond):
+					// Periodic check as fallback
+				case <-w.ctx.Done():
+					return nil, nil
+				}
 			}
 		} else {
 			return nil, nil
 		}
 	}
 
-	if w.closing {
+	if w.closing.Load() {
 		return nil, nil
 	}
 
-	if w.drained && opts.Block && w.limitUntil == 0 {
+	if w.drained.Load() && opts.Block && w.limitUntil.Load() == 0 {
 		jobID, err := w.waitForJob()
 		if err != nil {
-			if !w.paused && !w.closing {
+			if !w.paused.Load() && !w.closing.Load() {
 				return nil, fmt.Errorf("failed to wait for job: %v", err)
 			}
 			return nil, nil
 		}
-
-		fmt.Println("jobID", jobID)
 
 		if jobID == "" {
 			return nil, nil
@@ -488,8 +502,8 @@ func (w *Worker) getNextJob(token string, opts GetNextJobOptions) (*types.Job, e
 		}
 		return j, nil
 	} else {
-		if w.limitUntil != 0 {
-			if err := w.delay(w.limitUntil); err != nil {
+		if limitUntil := w.limitUntil.Load(); limitUntil != 0 {
+			if err := w.delay(limitUntil); err != nil {
 				return nil, fmt.Errorf("failed to delay: %v", err)
 			}
 		}
@@ -510,7 +524,7 @@ func (w *Worker) moveToActive(token string, jobId string) (*types.Job, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse blockUntil: %v", err)
 		}
-		w.blockUntil = int64(blockUntil)
+		w.blockUntil.Store(int64(blockUntil))
 	}
 
 	keys := []string{
@@ -620,8 +634,8 @@ func (w *Worker) waitForJob() (string, error) {
 	if blockTimeout <= 0 {
 		blockTimeout = 10 * time.Millisecond
 	}
-	if w.blockUntil > 0 { // compute remaining delay from blockUntil timestamp (ms)
-		remaining := time.Until(time.UnixMilli(w.blockUntil))
+	if blockUntil := w.blockUntil.Load(); blockUntil > 0 { // compute remaining delay from blockUntil timestamp (ms)
+		remaining := time.Until(time.UnixMilli(blockUntil))
 		if remaining < 10*time.Millisecond {
 			remaining = 10 * time.Millisecond
 		}
@@ -637,11 +651,28 @@ func (w *Worker) waitForJob() (string, error) {
 	return result, nil
 }
 
-// delay delays the execution for the specified time
+// sleepContext sleeps for the specified duration or until context is cancelled.
+// Returns nil on normal completion, or the context error if cancelled.
+func sleepContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// delay delays the execution for the specified time, respecting context cancellation
 func (w *Worker) delay(until int64) error {
 	now := time.Now().UnixMilli()
 	if until > now {
-		time.Sleep(time.Duration(until-now) * time.Millisecond)
+		return sleepContext(w.ctx, time.Duration(until-now)*time.Millisecond)
 	}
 	return nil
 }
@@ -656,17 +687,17 @@ func (w *Worker) nextJobFromJobData(
 ) (*types.Job, error) {
 	// Handle nil jobData
 	if jobData == nil {
-		if !w.drained {
+		if !w.drained.Load() {
 			w.Emit("drained")
-			w.drained = true
-			w.blockUntil = 0
+			w.drained.Store(true)
+			w.blockUntil.Store(0)
 		}
 	}
 
 	// Update limitUntil and delayUntil
-	w.limitUntil = int64(math.Max(float64(limitUntil), 0))
+	w.limitUntil.Store(int64(math.Max(float64(limitUntil), 0)))
 	if delayUntil > 0 {
-		w.blockUntil = int64(math.Max(float64(delayUntil), 0))
+		w.blockUntil.Store(int64(math.Max(float64(delayUntil), 0)))
 	}
 
 	if jobData == nil {
@@ -674,7 +705,7 @@ func (w *Worker) nextJobFromJobData(
 	}
 
 	// Process jobData if present
-	w.drained = false
+	w.drained.Store(false)
 	job := w.createJob(jobData, jobID)
 	job.Token = token
 	if job.Opts.Repeat != nil && (job.Opts.Repeat.Every != 0 || job.Opts.Repeat.Pattern != "") {
@@ -689,7 +720,7 @@ func (w *Worker) nextJobFromJobData(
 
 // processJob processes the job
 func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func() bool) (types.Job, error) {
-	if w.closing || w.paused {
+	if w.closing.Load() || w.paused.Load() {
 		return types.Job{}, nil
 	}
 
@@ -703,12 +734,12 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 	var err error
 
 	proccessFnCtx, proccessFnCtxCancel := context.WithCancel(w.ctx)
+	defer proccessFnCtxCancel() // Single cancel via defer to avoid double-cancel
 
 	// Wrap processFn call with recover to handle panics
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				proccessFnCtxCancel()
 				w.Emit("error", fmt.Sprintf("Panic recovered for job %s with token %s: %v", job.Id, token, r))
 				err = fmt.Errorf("panic: %v", r)
 			}
@@ -716,7 +747,6 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 
 		api := &workerProcessAPI{w: w, job: job}
 		result, err = w.processFn(proccessFnCtx, &job, api)
-		proccessFnCtxCancel()
 	}()
 
 	// Remove job from jobsInProgress
@@ -725,21 +755,20 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 	w.jobsInProgress.Unlock()
 
 	if err != nil {
-		fmt.Println("Error processing job:", err)
-		if err.Error() == RateLimitError {
+		if errors.Is(err, ErrRateLimit) {
 			// Move job back from active to wait and set limitUntil based on limiter TTL
 			if w.scripts != nil {
 				pttl, mErr := w.scripts.moveJobFromActiveToWait(job.Id, token)
 				if mErr != nil {
 					w.Emit("error", fmt.Sprintf("moveJobFromActiveToWait failed for %s: %v", job.Id, mErr))
 				} else {
-					w.limitUntil = time.Now().Add(time.Duration(pttl) * time.Millisecond).UnixMilli()
+					w.limitUntil.Store(time.Now().Add(time.Duration(pttl) * time.Millisecond).UnixMilli())
 				}
 			}
 			return types.Job{}, err
 		}
 
-		if err.Error() == "DelayedError" || err.Error() == "WaitingChildrenError" {
+		if errors.Is(err, ErrDelayed) || errors.Is(err, ErrWaitingChildren) {
 			return types.Job{}, err
 		}
 
@@ -797,7 +826,12 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 			if w.opts.RemoveOnFail != nil {
 				removeOnFail = *w.opts.RemoveOnFail
 			}
-			if moveErr := JobMoveToFailed(w.scripts, &job, err, token, removeOnFail, fetchNextCallback()); moveErr != nil {
+			lockDurationMs := int(w.opts.LockDuration / time.Millisecond)
+			maxMetricsSize := ""
+			if w.opts.Metrics != nil && w.opts.Metrics.MaxDataPoints > 0 {
+				maxMetricsSize = strconv.Itoa(w.opts.Metrics.MaxDataPoints)
+			}
+			if moveErr := JobMoveToFailed(w.scripts, &job, err, token, removeOnFail, fetchNextCallback(), lockDurationMs, maxMetricsSize); moveErr != nil {
 				w.Emit("error", fmt.Sprintf("Error explicitly moving job %s to failed: %v", job.Id, moveErr))
 			}
 			w.Emit("failed", job, err, "active")
@@ -816,8 +850,9 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 			w.Emit("error", fmt.Sprintf("Repeatable job %s has non-string data (%T), cannot reschedule", job.Id, job.Data)) // Added type info
 		} else {
 			// Use a background context for scheduling the next job, as the current job's context might be ending.
-			scheduleCtx := context.Background()                                                     // Or w.ctx if it lives long enough?
-			tempQueue := &Queue{Client: w.redisClient, KeyPrefix: w.KeyPrefix, EventEmitter: *w.ee} // Temporary Queue-like struct for method access, pass event emitter by value
+			scheduleCtx := context.Background()
+			tempQueue := &Queue{Client: w.redisClient, KeyPrefix: w.KeyPrefix}
+			tempQueue.EventEmitter.Init() // Initialize a fresh EventEmitter to avoid copying mutex
 			if scheduleErr := tempQueue.scheduleNextRepeatableJob(scheduleCtx, job.Name, jobJSONData, job.Opts); scheduleErr != nil {
 				w.Emit("error", fmt.Sprintf("Failed to schedule next instance for repeatable job %s: %v", job.Id, scheduleErr))
 			}
@@ -825,8 +860,13 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 	}
 
 	// Prepare args for moving job to completed state
+	lockDurationMs := int(w.opts.LockDuration / time.Millisecond)
+	maxMetricsSize := ""
+	if w.opts.Metrics != nil && w.opts.Metrics.MaxDataPoints > 0 {
+		maxMetricsSize = strconv.Itoa(w.opts.Metrics.MaxDataPoints)
+	}
 
-	keys, args, err := func(ctx context.Context, client redis.Cmdable, queueKey string, job *types.Job, result interface{}, token string, getNext bool) ([]string, []interface{}, error) {
+	keys, args, err := func(ctx context.Context, client redis.Cmdable, queueKey string, job *types.Job, result interface{}, token string, getNext bool, lockDurationMs int, maxMetricsSize string) ([]string, []interface{}, error) {
 		job.Returnvalue = result
 
 		stringifiedReturnValue, err := json.Marshal(result)
@@ -834,8 +874,8 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 			return nil, nil, fmt.Errorf("failed to marshal return value: %v", err)
 		}
 
-		return w.scripts.moveToFinishedArgs(job, string(stringifiedReturnValue), "returnvalue", job.Opts.RemoveOnComplete, "completed", token, time.Now(), getNext)
-	}(w.ctx, w.redisClient, w.KeyPrefix, &job, result, token, (fetchNextCallback() && !(w.closing || w.paused)))
+		return w.scripts.moveToFinishedArgs(job, string(stringifiedReturnValue), "returnvalue", job.Opts.RemoveOnComplete, "completed", token, time.Now(), getNext, lockDurationMs, maxMetricsSize)
+	}(w.ctx, w.redisClient, w.KeyPrefix, &job, result, token, (fetchNextCallback() && !(w.closing.Load() || w.paused.Load())), lockDurationMs, maxMetricsSize)
 	if err != nil {
 		w.Emit("error", fmt.Sprintf("Error moving job to completed: %v", err))
 		return types.Job{}, err
@@ -914,49 +954,57 @@ func (w *Worker) processJob(job types.Job, token string, fetchNextCallback func(
 }
 
 func (w *Worker) Pause() {
-	if w.paused {
+	if w.paused.Load() {
 		return
 	}
 
-	w.paused = true
+	w.paused.Store(true)
 	w.Emit("paused")
 }
 
 // Resume resumes processing of this worker (if paused)
 func (w *Worker) Resume() {
-	if !w.paused {
+	if !w.paused.Load() {
 		return
 	}
 
-	w.paused = false
+	w.paused.Store(false)
+	// Signal any waiting goroutines that pause state has changed
+	select {
+	case w.pauseCh <- struct{}{}:
+	default:
+		// Non-blocking send, if channel is full, goroutines will check paused state
+	}
 	w.Emit("resumed")
 }
 
 // IsPaused returns true if the worker is paused
 func (w *Worker) IsPaused() bool {
-	return w.paused
+	return w.paused.Load()
 }
 
 // IsRunning returns true if the worker is running
 func (w *Worker) IsRunning() bool {
-	return w.running
+	return w.running.Load()
 }
 
 func (w *Worker) Wait() {
 	w.wg.Wait()
 }
 
-// Close closes the worker
-func (w *Worker) Close() {
+// Close closes the worker gracefully with timeout.
+// Returns an error if shutdown times out.
+func (w *Worker) Close() error {
 	w.mutex.Lock()
-	defer w.mutex.Unlock()
 
-	if w.closing {
-		return
+	if w.closing.Load() {
+		w.mutex.Unlock()
+		return nil
 	}
 
-	w.closing = true
+	w.closing.Store(true)
 
+	// Cancel context FIRST to unblock any sleeping goroutines
 	w.cancel()
 
 	// Stop timers
@@ -967,22 +1015,59 @@ func (w *Worker) Close() {
 		w.extendLocksTimer.Stop()
 	}
 
-	// Wait for all jobs to finish
-	w.wg.Wait()
+	timeout := w.opts.ShutdownTimeout
+	w.mutex.Unlock()
+
+	// Wait for main goroutine with timeout
+	done := make(chan struct{})
+	go func() {
+		w.wg.Wait()
+		close(done)
+	}()
+
+	var timedOut bool
+	select {
+	case <-done:
+		// Graceful shutdown successful
+	case <-time.After(timeout):
+		// Force shutdown after timeout
+		w.Emit("error", fmt.Errorf("worker shutdown timed out after %v", timeout))
+		timedOut = true
+	}
 
 	// Ensure the async FIFO queue is drained and closed
+	var queueErr error
 	if w.asyncFifoQueue != nil {
-		w.asyncFifoQueue.WaitAll()
+		// Use remaining timeout for queue cleanup (at least minQueueCleanupTimeout)
+		queueTimeout := timeout / 2
+		if queueTimeout < minQueueCleanupTimeout {
+			queueTimeout = minQueueCleanupTimeout
+		}
+		if err := w.asyncFifoQueue.WaitAll(queueTimeout); err != nil {
+			queueErr = fmt.Errorf("failed to close FIFO queue: %w", err)
+		}
 	}
+
+	// Combine errors if both timeout and queue error occurred
+	if timedOut && queueErr != nil {
+		return errors.Join(fmt.Errorf("worker shutdown timed out after %v", timeout), queueErr)
+	}
+	if timedOut {
+		return fmt.Errorf("worker shutdown timed out after %v", timeout)
+	}
+	if queueErr != nil {
+		return queueErr
+	}
+	return nil
 }
 
 // startStalledCheckTimer starts the stalled check timer
 func (w *Worker) startStalledCheckTimer() {
-	if w.closing || w.opts.SkipStalledCheck {
+	if w.closing.Load() || w.opts.SkipStalledCheck {
 		return
 	}
 	w.stalledCheckTimer = time.AfterFunc(w.opts.StalledInterval, func() {
-		if w.closing || w.opts.SkipStalledCheck {
+		if w.closing.Load() || w.opts.SkipStalledCheck {
 			return
 		}
 		if err := w.moveStalledJobsToWait(); err != nil {
@@ -994,13 +1079,13 @@ func (w *Worker) startStalledCheckTimer() {
 
 // startLockExtender starts the lock extender
 func (w *Worker) startLockExtender() {
-	if w.closing || w.opts.SkipLockRenewal {
+	if w.closing.Load() || w.opts.SkipLockRenewal {
 		return
 	}
 	w.extendLocksTimer = time.AfterFunc(w.opts.LockRenewTime/2, func() {
 		w.jobsInProgress.Lock()
 		defer w.jobsInProgress.Unlock()
-		if w.closing || w.opts.SkipLockRenewal {
+		if w.closing.Load() || w.opts.SkipLockRenewal {
 			return
 		}
 		now := time.Now()
@@ -1029,7 +1114,8 @@ func (w *Worker) startLockExtender() {
 // whenCurrentJobsFinished waits until all current jobs are finished
 func (w *Worker) whenCurrentJobsFinished() {
 	if w.asyncFifoQueue != nil {
-		w.asyncFifoQueue.WaitAll()
+		// Use shutdown timeout for waiting
+		_ = w.asyncFifoQueue.WaitAll(w.opts.ShutdownTimeout)
 		return
 	}
 	for {
@@ -1039,25 +1125,38 @@ func (w *Worker) whenCurrentJobsFinished() {
 		if remaining == 0 {
 			break
 		}
-		time.Sleep(50 * time.Millisecond)
+		if err := sleepContext(w.ctx, 50*time.Millisecond); err != nil {
+			return // Context cancelled, exit early
+		}
 	}
 }
 
-// retryIfFailed retries a job if it failed
+// retryIfFailed retries a job if it failed, respecting context cancellation
 func (w *Worker) retryIfFailed(jobFunc func() (*types.Job, error), delay time.Duration) (types.Job, error) {
 	for {
+		// Check context before attempting
+		select {
+		case <-w.ctx.Done():
+			return types.Job{}, w.ctx.Err()
+		default:
+		}
+
 		nextJob, err := jobFunc()
 		if err != nil {
 			w.Emit("error", err)
 			if delay > 0 {
-				time.Sleep(delay)
+				if err := sleepContext(w.ctx, delay); err != nil {
+					return types.Job{}, err
+				}
 				continue
 			}
 			return types.Job{}, err
 		}
 		if nextJob == nil {
 			if delay > 0 {
-				time.Sleep(delay)
+				if err := sleepContext(w.ctx, delay); err != nil {
+					return types.Job{}, err
+				}
 				continue
 			}
 			return types.Job{}, nil
@@ -1143,7 +1242,7 @@ func (w *Worker) moveStalledJobsToWait() error {
 		w.Emit("stalled", jobId, "active")
 	}
 
-	failedJobs := make([]types.Job, len(failed))
+	failedJobs := make([]types.Job, 0, len(failed))
 	for i, jobId := range failed {
 		j, err := JobFromId(w.ctx, w.redisClient, w.KeyPrefix, jobId)
 		if err != nil {

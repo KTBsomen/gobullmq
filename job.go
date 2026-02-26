@@ -55,11 +55,8 @@ func JobFromJson(jobData map[string]interface{}) (types.Job, error) {
 		if err != nil {
 			return types.Job{}, fmt.Errorf("failed to parse job options JSON string: %w", err)
 		}
-	} else {
-		// Handle case where opts might be missing - apply defaults?
-		// Or should this be an error? For now, use default struct.
-		fmt.Printf("Warning: Job %s missing 'opts' field or it's not a string.\n", idStr)
 	}
+	// If opts is missing or empty, use default struct (already initialized)
 
 	job := types.Job{
 		Name: nameStr,
@@ -254,16 +251,14 @@ func _JobOptsFromJson(rawOpts string) (types.JobOptions, error) {
 	return jobOpts, nil
 }
 
-// TODO: Complete these two key bits of logic, or else we can never finish processing anythings
-
 // JobMoveToFailed moves a job to the 'failed' set in Redis.
 // It requires the scripts instance for Redis interaction.
-func JobMoveToFailed(s *scripts, job *types.Job, err error, token string, removeOnFailed types.KeepJobs, fetchNext bool) error {
+func JobMoveToFailed(s *scripts, job *types.Job, err error, token string, removeOnFailed types.KeepJobs, fetchNext bool, lockDurationMs int, maxMetricsSize string) error {
 	job.FailedReason = err.Error()
 
 	// TODO: Consider saving stacktrace here if needed, similar to JS version.
 
-	keys, args, scriptErr := s.moveToFailedArgs(job, job.FailedReason, removeOnFailed, token, fetchNext)
+	keys, args, scriptErr := s.moveToFailedArgs(job, job.FailedReason, removeOnFailed, token, fetchNext, lockDurationMs, maxMetricsSize)
 	if scriptErr != nil {
 		// Consider emitting an error event here or logging
 		return fmt.Errorf("error preparing move to failed args for job %s: %w", job.Id, scriptErr)

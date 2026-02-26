@@ -27,9 +27,9 @@ func newScripts(redisClient redis.Cmdable, ctx context.Context, keyPrefix string
 	}
 }
 
-func (s *scripts) moveToFailedArgs(job *types.Job, failedReason string, removeOnFailed types.KeepJobs, token string, fetchNext bool) ([]string, []interface{}, error) {
+func (s *scripts) moveToFailedArgs(job *types.Job, failedReason string, removeOnFailed types.KeepJobs, token string, fetchNext bool, lockDurationMs int, maxMetricsSize string) ([]string, []interface{}, error) {
 	timestamp := time.Now()
-	return s.moveToFinishedArgs(job, failedReason, "failedReason", removeOnFailed, "failed", token, timestamp, fetchNext)
+	return s.moveToFinishedArgs(job, failedReason, "failedReason", removeOnFailed, "failed", token, timestamp, fetchNext, lockDurationMs, maxMetricsSize)
 }
 
 // getKeepJobs determines the job retention policy based on provided parameters
@@ -58,7 +58,7 @@ func (s *scripts) getKeepJobs(shouldRemove interface{}, workerKeepJobs *types.Ke
 	}
 }
 
-func (s *scripts) moveToFinishedArgs(job *types.Job, value string, propValue string, shouldRemove interface{}, target string, token string, timestamp time.Time, fetchNext bool) ([]string, []interface{}, error) {
+func (s *scripts) moveToFinishedArgs(job *types.Job, value string, propValue string, shouldRemove interface{}, target string, token string, timestamp time.Time, fetchNext bool, lockDurationMs int, maxMetricsSize string) ([]string, []interface{}, error) {
 	// Build the keys array - equivalent to moveToFinishedKeys in JS
 	keys := []string{
 		s.keyPrefix + "wait",
@@ -105,10 +105,10 @@ func (s *scripts) moveToFinishedArgs(job *types.Job, value string, propValue str
 	opts := map[string]interface{}{
 		"token":          token,
 		"keepJobs":       payload,
-		"lockDuration":   30000, // TODO: Get from worker options?
+		"lockDuration":   lockDurationMs,
 		"attempts":       job.Opts.Attempts,
 		"attemptsMade":   job.AttemptsMade,
-		"maxMetricsSize": "",                                 // TODO: Get from metrics options?
+		"maxMetricsSize": maxMetricsSize,
 		"fpof":           job.Opts.FailParentOnFailure,       // Use value from job options
 		"rdof":           job.Opts.RemoveDependencyOnFailure, // Use value from job options
 		"parentKey":      job.ParentKey,                      // Pass parent key
